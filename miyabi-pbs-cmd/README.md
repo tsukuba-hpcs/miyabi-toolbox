@@ -9,9 +9,11 @@ It gives Codex a concrete workflow for moving between a local development machin
 - Routes Codex behavior by hostname:
   - local machines use a local-development workflow with GitHub branch synchronization;
   - `miyabi-g*` and `interact-g*` hosts use Miyabi remote-development rules;
-  - PBS compute/debug nodes such as `mg<number>` are treated as runtime-capable nodes.
+  - PBS compute/debug nodes such as `mg<number>` are treated as runtime-capable only when the allocation is confirmed.
 - Keeps Miyabi login nodes as a control plane only.
 - Pushes runtime validation to PBS interactive/debug or batch compute nodes.
+- Uses pager-safe `module avail`/`module list` discovery and reloads required
+  modules inside PBS job shells.
 - Provides validation ladders for local checks, login-node static checks, 1-node runtime checks, and 2-node distributed checks.
 - Includes reusable PBS patterns for:
   - Python environment setup with `uv`;
@@ -24,16 +26,20 @@ It gives Codex a concrete workflow for moving between a local development machin
 
 ```text
 miyabi-development/
-├── SKILL.md
+├── agents/
+│   └── openai.yaml
 ├── README.md
+├── SKILL.md
 └── references/
     ├── accelerate-pbs.md
+    ├── git-sync.md
+    ├── miyabi-operations.md
     ├── python-env.md
     ├── torchrun-pbs.md
     └── vllm-miyabi.md
 ```
 
-`SKILL.md` is the main Codex skill file. The files under `references/` are loaded only when a task needs those details.
+`SKILL.md` is the main Codex skill file, `agents/openai.yaml` provides UI metadata, and the files under `references/` are loaded only when a task needs those details.
 
 ## Installation
 
@@ -89,7 +95,7 @@ Use this when Codex starts on your laptop or workstation.
 
 1. Edit code, tests, configs, or qsub scripts locally.
 2. Run local checks that are safe for the local machine.
-3. Push a `codex/<task-name>` feature branch.
+3. When Miyabi synchronization is needed, push a `codex/<task-name>` feature branch.
 4. Fetch the branch on Miyabi.
 5. Run static checks on the login node.
 6. Request a 1-node interactive allocation for runtime validation.
@@ -110,10 +116,12 @@ Use this when Codex is running in a remote Miyabi shell.
 
 Use these files as extension points and implementation examples:
 
-- `references/python-env.md`: default Python environment policy using `uv`, project-local `.venv`, and Python version defaults.
+- `references/python-env.md`: project-first Python environment policy using `uv` and a project-local `.venv` when appropriate.
+- `references/git-sync.md`: safe feature-branch synchronization without automatic merges or history rewriting.
+- `references/miyabi-operations.md`: pager-safe module discovery, job-shell module loading, storage selection, live queue discovery, and job diagnostics distilled from the Miyabi User's Guide.
 - `references/torchrun-pbs.md`: PBS template for `mpirun -> torchrun`, including rank setup and `MASTER_ADDR` handling.
 - `references/accelerate-pbs.md`: PBS/Open MPI pattern for code that uses `Accelerator()` and reads distributed variables from the environment.
-- `references/vllm-miyabi.md`: vLLM-specific Miyabi guidance, including CUDA device normalization, compiler selection, FlashInfer sampler handling, and LoRA evaluation patterns.
+- `references/vllm-miyabi.md`: version-aware vLLM guidance, including safe CUDA UUID handling, compiler and FlashInfer diagnostics, and LoRA evaluation patterns.
 
 ## Adapting This Skill To Your Needs
 
@@ -206,7 +214,3 @@ When extending this skill:
 - prefer placeholders such as `<project_root>`, `<group_id>`, and `<config.yaml>`;
 - keep examples small enough for debug allocations;
 - add a reference file for new frameworks instead of expanding `SKILL.md` indefinitely.
-
-## License
-
-Add the license that matches your repository before publishing this skill publicly.
