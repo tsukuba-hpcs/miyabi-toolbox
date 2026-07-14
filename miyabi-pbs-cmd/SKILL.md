@@ -1,17 +1,30 @@
 ---
 name: miyabi-development
 description: >-
-  Develop, review, test, and debug Miyabi-targeted projects from a local
-  workstation, a Miyabi login shell, or a PBS compute allocation. Use for
-  Miyabi PBS/qsub scripts, Environment Modules, GPU or distributed ML
-  workloads, CUDA/NCCL, MPI, torchrun, Hugging Face Accelerate, vLLM, training,
-  inference, environment setup, and cluster runtime failures. Route work by
-  hostname plus PBS context, keep login nodes control-plane only, synchronize
-  tracked source safely, and validate runtime behavior on interactive/debug or
-  batch compute nodes.
+  Develop, test, and debug Miyabi-targeted projects from a local workstation, a
+  Miyabi login shell, or a PBS compute allocation. Use when work requires
+  Miyabi PBS/qsub, Environment Modules, GPU or distributed runtime validation,
+  CUDA/NCCL, MPI, torchrun, Hugging Face Accelerate, vLLM, training, inference,
+  environment setup, or cluster runtime diagnosis. Route work by hostname plus
+  PBS context, keep login nodes control-plane only, and choose interactive or
+  batch compute nodes safely. Do not invoke for requests explicitly limited to
+  analyzing or editing documents or source files with no testing or runtime
+  validation, unless the user explicitly requests this skill.
 ---
 
 # Miyabi Development
+
+## Skip File-Only Work
+
+If the user explicitly limits the task to analyzing or editing documents or
+source files and excludes testing or runtime validation, skip the rest of this
+skill. Work directly in the current checkout; do not run `hostname`, load the
+Miyabi references, synchronize to Miyabi, or request a PBS allocation solely
+because the project targets Miyabi.
+
+If the scope later expands to tests, heavy imports, runtime validation, PBS,
+modules, GPU/distributed execution, training, or inference, resume this skill
+and classify the host before running those commands.
 
 ## Start By Classifying The Host
 
@@ -84,9 +97,32 @@ their reference instead of copying them into this file.
   compute-node shell before running project code.
 - Prefer the smallest check that proves the changed behavior. Do not allocate
   more nodes or walltime than the next complete attempt needs.
+- Prefer one persistent 1-node interactive allocation for iterative
+  development, `pytest` or other unit tests, and short single-node CPU/GPU
+  checks. Reuse that allocation across edit-test-debug cycles instead of
+  submitting many extremely short jobs.
+- Do not create a subagent merely to obtain or retain an interactive
+  allocation. Keep the primary agent attached to one persistent terminal
+  session; delegate only genuinely independent work, and designate exactly one
+  agent as allocation owner if delegation is otherwise justified.
 - Preserve existing user changes. Do not merge to `main`, rewrite history,
   force-push, or overwrite tracked source by direct copy without explicit user
   authorization.
+
+## Choose Interactive Or Batch Runtime
+
+Use a persistent 1-node interactive allocation for focused tests, iterative
+debugging, short single-node GPU checks, and capped real-path smoke tests that
+fit within the interactive walltime. Keep the allocation open after each test,
+edit the shared project files as needed, and rerun validation in the same
+compute-node shell.
+
+Submit a batch job only when the workload needs unattended or durable
+execution, a complete training/inference/evaluation run, sustained GPU use that
+cannot fit comfortably within the interactive limit, or multi-node execution
+beyond the brief 2-node interactive debug path. A tiny real-model or
+real-dataset smoke test does not require a batch job merely because it uses the
+real runtime path.
 
 ## Verify Site Defaults Before Submission
 
@@ -161,13 +197,18 @@ On a confirmed compute/debug node:
 2. Load the exact required modules in this compute-node shell and capture
    `module list` without a pager.
 3. Run the focused test before the full application path.
-4. Check remaining walltime after every attempt.
-5. Preserve logs and artifacts before leaving the allocation.
-6. Exit the interactive shell when validation is complete.
+4. Keep this same interactive shell alive while editing, rerunning `pytest`,
+   and iterating on short single-node GPU checks. Project files are on shared
+   storage, so normal Codex file-editing tools and the retained compute shell
+   can participate in the same edit-test loop.
+5. Check remaining walltime after every attempt.
+6. Preserve logs and artifacts before leaving the allocation.
+7. Exit to the Miyabi login node only when runtime validation is complete or
+   the remaining walltime cannot cover another full attempt plus cleanup.
 
 ## Request Interactive Runtime
 
-Start with one node:
+Start with one node in a persistent terminal/PTY session:
 
 ```bash
 GROUP_ID="${GROUP_ID:-$(groups | tr ' ' '\n' | awk '/^xg/ {print; exit}')}"
@@ -189,6 +230,11 @@ runtime command, follow `references/miyabi-operations.md`: disable module
 pagers, inspect the compute-node defaults, load the required modules in this
 shell, and verify the result with `module list`.
 
+Keep using this same terminal session after each command. If the terminal tool
+returns a session identifier, retain and resume that identifier; do not start a
+new `qsub -I` for every test. Do not exit merely because one test or edit-test
+cycle finished.
+
 After each attempt, inspect used and requested walltime:
 
 ```bash
@@ -209,6 +255,11 @@ Do not start another compile, download, model load, training run, inference run,
 or multi-node launch unless the remaining walltime covers the full attempt plus
 artifact preservation and cleanup.
 
+When walltime is close to exhaustion, save logs and required artifacts, stop
+any background processes, and `exit` cleanly to the Miyabi login node. Continue
+static editing there; request a fresh interactive allocation only if more
+runtime validation remains.
+
 ## Climb The Validation Ladder Deliberately
 
 Stop at the smallest level that proves the change; continue when the changed
@@ -220,7 +271,8 @@ behavior depends on the next level:
 4. 1-node targeted runtime test in an allocation.
 5. 1-node real training/inference path with a tiny workload.
 6. 2-node real distributed path when multi-node behavior changed.
-7. Full GPU or multi-node batch job after debug validation passes.
+7. Full or long-running training/inference/evaluation, sustained GPU use, or
+   multi-node execution beyond brief debug validation in a batch job.
 
 For a real training check, use the actual model/data path when available and
 cap work at about 10 optimizer steps or the closest project equivalent. For

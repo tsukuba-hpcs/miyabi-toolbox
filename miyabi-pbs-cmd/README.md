@@ -12,6 +12,11 @@ It gives Codex a concrete workflow for moving between a local development machin
   - PBS compute/debug nodes such as `mg<number>` are treated as runtime-capable only when the allocation is confirmed.
 - Keeps Miyabi login nodes as a control plane only.
 - Pushes runtime validation to PBS interactive/debug or batch compute nodes.
+- Reuses one persistent 1-node interactive allocation for edit-test-debug
+  cycles, unit tests, and short single-node GPU checks instead of submitting
+  many extremely short jobs.
+- Keeps the primary agent attached to that interactive session; a subagent is
+  not needed merely to retain the allocation.
 - Uses pager-safe `module avail`/`module list` discovery and reloads required
   modules inside PBS job shells.
 - Provides validation ladders for local checks, login-node static checks, 1-node runtime checks, and 2-node distributed checks.
@@ -75,6 +80,17 @@ Help me add a 1-node Miyabi smoke test for this training script.
 Debug this vLLM inference failure on Miyabi. Start with safe login-node checks.
 ```
 
+## When Not To Use This Skill
+
+Do not invoke this skill merely because a repository eventually runs on
+Miyabi. If the user explicitly limits the task to analyzing or editing
+documents or source files and excludes testing or runtime validation, work
+directly in the current checkout without hostname classification, Miyabi
+synchronization, or a PBS allocation.
+
+Invoke the skill if the task later expands to tests, runtime validation,
+Environment Modules, PBS, GPU/distributed execution, training, or inference.
+
 When the skill is active, Codex should first check:
 
 ```bash
@@ -85,7 +101,10 @@ It then chooses the correct workflow:
 
 - non-Miyabi host: edit locally, run safe local checks, and sync tracked source through a feature branch when Miyabi validation is needed;
 - Miyabi login host: inspect, edit, run static checks, submit or inspect PBS jobs, but do not run heavy runtime commands;
-- Miyabi compute/debug host: run focused tests, smoke commands, training, inference, or distributed launchers only after a valid PBS allocation is confirmed.
+- Miyabi compute/debug host: run focused tests, smoke commands, capped
+  training/inference checks, or brief distributed launcher validation only
+  after a valid PBS allocation is confirmed; use batch jobs for full or
+  long-running workloads.
 
 ## Typical Workflows
 
@@ -108,9 +127,17 @@ Use this when Codex is running in a remote Miyabi shell.
 
 1. Check the hostname.
 2. If on a login node, only inspect, edit, run static checks, and manage PBS jobs.
-3. If runtime validation is needed, request an interactive allocation.
+3. If runtime validation is needed, request one 1-node interactive allocation
+   in a persistent terminal session.
 4. Inside the allocation, confirm the compute hostname and run the smallest real check that exercises the changed behavior.
-5. Check remaining walltime after each attempt before starting another compile, download, training, or inference run.
+5. Keep the same allocation open while editing files and rerunning unit tests or
+   short single-node GPU checks.
+6. Check remaining walltime after each attempt. Exit to the login node when
+   validation is complete or there is not enough time for another full attempt
+   plus cleanup.
+7. Use a batch job for complete or long-running training/inference/evaluation,
+   sustained GPU use beyond the interactive limit, or multi-node work beyond a
+   brief 2-node debug allocation.
 
 ## Included References
 
@@ -203,6 +230,12 @@ Run on PBS interactive/debug or batch compute nodes instead:
 - heavy imports such as `torch`, `transformers`, `datasets`, `accelerate`, or `vllm`;
 - model loading, training, inference, evaluation, and preprocessing;
 - `torchrun`, `accelerate launch`, `mpirun`, CUDA, NCCL, and GPU profiling.
+
+Prefer a persistent 1-node interactive allocation for iterative tests and
+short GPU validation. Keep that terminal session alive across edits and test
+runs. Do not create a subagent only to hold the allocation. Reserve batch jobs
+for long, unattended, complete, or multi-node workloads that do not fit the
+interactive debug limits.
 
 ## Contributing
 
