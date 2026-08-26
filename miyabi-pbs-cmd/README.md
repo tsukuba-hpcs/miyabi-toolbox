@@ -8,7 +8,7 @@ It gives Codex a concrete workflow for moving between a local development machin
 
 - Routes Codex behavior by hostname:
   - local machines use a local-development workflow with GitHub branch synchronization;
-  - `miyabi-g*` and `interact-g*` hosts use Miyabi remote-development rules;
+  - `miyabi-g*`, `miyabi-c*`, and `interact-g*` hosts use Miyabi remote-development rules;
   - PBS compute/debug nodes such as `mg<number>` are treated as runtime-capable only when the allocation is confirmed.
 - Keeps Miyabi login nodes as a control plane only.
 - Pushes runtime validation to PBS interactive/debug or batch compute nodes.

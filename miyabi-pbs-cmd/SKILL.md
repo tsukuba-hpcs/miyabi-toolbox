@@ -37,11 +37,12 @@ printf 'PBS_JOBID=%s\nPBS_NODEFILE=%s\n' "${PBS_JOBID:-}" "${PBS_NODEFILE:-}"
 
 Classify the current shell:
 
-- **Local**: the hostname does not match `miyabi-g*` or `interact-g*`, and the
-  shell is not an allocated `mg<number>` node. Use the Local Workflow.
-- **Miyabi control plane**: the hostname matches `miyabi-g*`, or an
-  `interact-g*` entry has no confirmed PBS allocation. Use the Remote Workflow
-  but keep all work static.
+- **Local**: the hostname does not match `miyabi-g*`, `miyabi-c*`, or
+  `interact-g*`, and the shell is not an allocated `mg<number>` node. Use the
+  Local Workflow.
+- **Miyabi control plane**: the hostname matches `miyabi-g*` or `miyabi-c*`, or
+  an `interact-g*` entry has no confirmed PBS allocation. Use the Remote
+  Workflow but keep all work static.
 - **Miyabi compute/debug**: the hostname matches `mg<number>` and PBS evidence
   such as `$PBS_JOBID` or `$PBS_NODEFILE` confirms an allocation. Use the
   Remote Workflow and allow runtime validation.
@@ -129,7 +130,7 @@ real runtime path.
 Use these as Miyabi starting points, not timeless facts. Compare them with
 current site/project documentation and existing working scripts before `qsub`:
 
-- Login hosts: `miyabi-g1`, `miyabi-g2`, `miyabi-g3`, or `miyabi-g*` aliases.
+- Login hosts: hostnames matching `miyabi-g*` or `miyabi-c*`.
 - Interactive GPU queue: `interact-g`.
 - Common regular GPU queue in examples: `regular-g`.
 - 1-node interactive debug: start at `00:30:00`; use at most `01:00:00` when
