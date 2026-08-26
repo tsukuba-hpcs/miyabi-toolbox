@@ -44,6 +44,7 @@ If the host is unknown, inspect `hostname`, `$PBS_JOBID`, and `$PBS_NODEFILE`. I
 Keep this file loaded for the workflow. Load reference files only when the task needs their details:
 
 - Python environment setup or dependency installation: read `references/python-env.md`.
+- PBS batch job script creation, review, or submission with `qsub`: read `references/pbs-submission.md`.
 - PyTorch distributed, `torchrun`, or code expecting `RANK`, `WORLD_SIZE`, `LOCAL_RANK`, `MASTER_ADDR`, or `MASTER_PORT`: read `references/torchrun-pbs.md`.
 - Hugging Face Accelerate under MPI/PBS: read `references/accelerate-pbs.md`.
 - vLLM inference, LoRA evaluation, CUDA/Triton/FlashInfer runtime errors, or PBS jobs launching vLLM: read `references/vllm-miyabi.md`.
@@ -324,18 +325,6 @@ mpirun \
 ```
 
 If adapting an existing project script that uses `OMPI_MCA_mca_base_env_list`, keep that mechanism or `/usr/bin/env`, but do not add `mpirun -x`.
-
-## Job Script Review Checklist
-
-Before submitting a new or changed qsub script:
-
-- Confirm the PBS queue, group, node count, process count, walltime, and GPU assumptions with existing project scripts or user notes.
-- Confirm `cd "$PROJECT_ROOT"` points to the intended checkout.
-- Confirm Python, `torchrun`, `accelerate`, `module load`, cache directories, and dataset paths are project-specific placeholders or valid for the user.
-- Print `NNODES`, `WORLD_SIZE`, `MASTER_ADDR`, `MASTER_PORT`, ranks, hostnames, and log paths before launching.
-- Check Open MPI environment propagation: prefer `/usr/bin/env KEY=value ... bash -lc ...`; never mix `mpirun -x` with `OMPI_MCA_mca_base_env_list`.
-- Use `set -eEuo pipefail` and a simple error trap.
-- Write logs to a timestamped directory and preserve PBS output.
 
 ## Final Response Discipline
 
