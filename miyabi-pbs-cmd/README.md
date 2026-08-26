@@ -39,6 +39,7 @@ miyabi-development/
     ├── accelerate-pbs.md
     ├── git-sync.md
     ├── miyabi-operations.md
+    ├── pbs-submission.md
     ├── python-env.md
     ├── torchrun-pbs.md
     └── vllm-miyabi.md
@@ -146,6 +147,7 @@ Use these files as extension points and implementation examples:
 - `references/python-env.md`: project-first Python environment policy using `uv` and a project-local `.venv` when appropriate.
 - `references/git-sync.md`: safe feature-branch synchronization without automatic merges or history rewriting.
 - `references/miyabi-operations.md`: pager-safe module discovery, job-shell module loading, storage selection, live queue discovery, and job diagnostics distilled from the Miyabi User's Guide.
+- `references/pbs-submission.md`: PBS job-script review, site-default verification, syntax checks, walltime selection, and the final `qsub` submission gate.
 - `references/torchrun-pbs.md`: PBS template for `mpirun -> torchrun`, including rank setup and `MASTER_ADDR` handling.
 - `references/accelerate-pbs.md`: PBS/Open MPI pattern for code that uses `Accelerator()` and reads distributed variables from the environment.
 - `references/vllm-miyabi.md`: version-aware vLLM guidance, including safe CUDA UUID handling, compiler and FlashInfer diagnostics, and LoRA evaluation patterns.

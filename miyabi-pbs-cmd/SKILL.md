@@ -72,6 +72,8 @@ cache directories unless the repository or user provides them.
   `references/git-sync.md`.
 - Module discovery/loading, job-shell environments, storage, queue discovery,
   or job diagnostics: read `references/miyabi-operations.md`.
+- PBS batch job script creation, review, or submission with `qsub`: read
+  `references/pbs-submission.md`.
 - Python environment creation or dependency installation: read
   `references/python-env.md`.
 - PyTorch distributed or `torchrun`: read `references/torchrun-pbs.md`.
@@ -124,31 +126,6 @@ cannot fit comfortably within the interactive limit, or multi-node execution
 beyond the brief 2-node interactive debug path. A tiny real-model or
 real-dataset smoke test does not require a batch job merely because it uses the
 real runtime path.
-
-## Verify Site Defaults Before Submission
-
-Use these as Miyabi starting points, not timeless facts. Compare them with
-current site/project documentation and existing working scripts before `qsub`:
-
-- Login hosts: hostnames matching `miyabi-g*` or `miyabi-c*`.
-- Interactive GPU queue: `interact-g`.
-- Common regular GPU queue in examples: `regular-g`.
-- 1-node interactive debug: start at `00:30:00`; use at most `01:00:00` when
-  the next full attempt requires it.
-- 2-node interactive debug: use at most `00:10:00` and only after 1-node
-  validation passes.
-
-Derive the PBS group from the current account unless the project specifies one:
-
-```bash
-GROUP_ID="${GROUP_ID:-$(groups | tr ' ' '\n' | awk '/^xg/ {print; exit}')}"
-GROUP_ID="${GROUP_ID:-$(groups | awk '{print $1}')}"
-: "${GROUP_ID:?Could not determine GROUP_ID; set it explicitly}"
-printf 'GROUP_ID=%s\n' "$GROUP_ID"
-```
-
-Fill a literal value into `#PBS -W group_list=...`; PBS directives do not
-expand shell variables.
 
 ## Local Workflow
 
@@ -307,26 +284,6 @@ mpirun \
 Do not pin an MPI supervisor to one core when it will spawn multiple local
 workers unless the project explicitly designs and verifies that affinity.
 Follow existing site launcher conventions when they are stricter.
-
-## Review Every Job Script
-
-Before submission:
-
-- Confirm queue, group, node/process/GPU shape, walltime, and account policy.
-- Confirm `cd "$PROJECT_ROOT"`, Python/launcher paths, modules, caches, models,
-  datasets, and config arguments.
-- Put every required non-default `module load` in the executable body of the
-  PBS script, after PBS directives and before project commands. Do not rely on
-  module state inherited from the submission shell.
-- Disable module pagers and capture `module list` in the job log before the
-  launcher starts.
-- Require `$PBS_NODEFILE` when the launcher depends on it.
-- Print node count, world size, rendezvous address/port/id, ranks, hostnames,
-  project root, and log directory before launch.
-- Use `set -eEuo pipefail`, a concise `ERR` trap, timestamped logs, and preserved
-  PBS stdout/stderr.
-- Check MPI environment propagation and CPU binding explicitly.
-- Validate with `bash -n` on a login node before `qsub`.
 
 ## Report The Result Precisely
 
