@@ -33,7 +33,9 @@ guard exits 1 with JSON `ok:false` on refusal; invalid CLI arguments exit 2.
 It reads only OS identity and PBS environment/nodefile evidence, makes no
 scheduler calls, and never executes the project interpreter. This is a local
 execution guard, not scheduler authentication or proof that dependencies work;
-confirm live allocation state with qstat when entering/reusing a session.
+confirm live allocation state with [qstat_json.py](qstat.md#json-job-queries)
+for that PBS job ID when entering/reusing a session. Resource limits and walltime
+usage require the [detail fallback](qstat.md#native-fallback).
 The G/C host families are supported; unfamiliar site hosts need fresh evidence.
 
 | Check | Execution context |
@@ -129,5 +131,4 @@ compatibility, and retain the project lockfile discipline. Python 3.9 is the
 utility baseline, not a prescribed version for training.
 
 Sources: [uv project execution](https://docs.astral.sh/uv/concepts/projects/run/),
-[Python virtual environments](https://docs.python.org/3/library/venv.html), and
-the architecture/interpreter incidents indexed in [failure-lessons.md](failure-lessons.md).
+[Python virtual environments](https://docs.python.org/3/library/venv.html).

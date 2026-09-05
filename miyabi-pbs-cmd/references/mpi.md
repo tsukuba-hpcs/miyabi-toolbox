@@ -70,5 +70,3 @@ job can remain RUNNING after one actor has failed, so check launcher exit and
 rank/process results independently of the parent job state. For several
 independent actor jobs, account for scheduler startup and project limits before
 deciding that a missing application-ready signal means runtime failure.
-
-Sources and scope: [failure-lessons.md](failure-lessons.md).

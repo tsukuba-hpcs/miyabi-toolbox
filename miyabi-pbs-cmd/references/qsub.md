@@ -6,16 +6,12 @@ run `qsub` only within the user's authorized scope.
 
 ## Inspect Current Site State
 
-Before choosing a queue, node count, or walltime, read [qstat.md](qstat.md) and
-run:
+Use the [JSON job helper](qstat.md#json-job-queries) for current jobs and
+comparable history. Before choosing resources, inspect current queue shapes,
+project limits and occupancy using the [unwrapped queries](qstat.md#native-fallback);
+the helper does not yet expose these resource views.
 
-```bash
-qstat --rsc -x
-qstat --limit
-qstat --rscuse
-```
-
-The following Miyabi-G reference was checked with live `qstat --rsc -x` on
+The following Miyabi-G reference was checked with the live resource view on
 2026-09-05. Read current limits before choosing resources:
 
 | Submit with | Nodes | Maximum walltime | Scheduler destination |
@@ -44,7 +40,7 @@ Choose the queue and walltime in this order:
    ML checks, not a mandatory minimum; use measured task costs and queue limits.
 3. Exclude every queue whose node range or maximum walltime cannot satisfy the
    request.
-4. Use `qstat --rscuse` to compare current `Used/Total(Node)` values among the
+4. Compare current `Used/Total(Node)` values from the occupancy query among the
    remaining queues. Prefer an eligible queue with enough free capacity; do
    not treat a recorded utilization snapshot as current state.
 5. Prefer an eligible debug/short queue for a genuinely short batch workload.
@@ -52,11 +48,10 @@ Choose the queue and walltime in this order:
    and scheduler comments too. Account for both supervisors and their child jobs
    before running several experiments concurrently.
 
-Re-run the live commands when the displayed limits differ from this table;
-current Miyabi output is authoritative.
+Current Miyabi output is authoritative when it differs from this table.
 
 Use the project/user's PBS group. If none is specified, compare `groups` with
-the projects shown by `qstat --rsc -x`/`--limit`; infer it only when there is one
+the projects shown by the resource/limit queries; infer it only when there is one
 eligible choice. Multiple valid groups require resolving the intended allocation
 or accounting project, not choosing the first account group.
 
@@ -81,18 +76,21 @@ qsub -I \
   -l walltime=00:30:00
 ```
 
-After the prompt changes, confirm that the shell is an allocated compute node:
+After the prompt changes, guard the target context and query the allocation.
+`SKILL_ROOT` is the installed skill's absolute directory:
 
 ```bash
-hostname
-uname -m
-printf 'PBS_JOBID=%s\nPBS_NODEFILE=%s\n' "${PBS_JOBID:-}" "${PBS_NODEFILE:-}"
+SKILL_ROOT="/absolute/path/to/miyabi-development"
+/usr/bin/python3 -I "$SKILL_ROOT/scripts/context.py" \
+  --target-system Miyabi-G --require-compute
+/usr/bin/python3 -I "$SKILL_ROOT/scripts/qstat_json.py" "${PBS_JOBID:?}"
 cd <project_root>
 ```
 
-Keep the same terminal session while the allocation is needed. Load modules in
-this shell, inspect remaining walltime with `qstat`, preserve required files,
-stop background processes, and `exit` cleanly when finished.
+Require guard success before project execution. Keep the same terminal session
+while the allocation is needed and load modules in this shell. Inspect walltime
+limits/usage via the [job-detail fallback](qstat.md#native-fallback), preserve
+required files, stop background processes, and `exit` cleanly when finished.
 Follow [validation.md](validation.md) to keep failed check commands from closing
 the persistent shell and to renew the allocation within the authorized scope.
 
@@ -151,17 +149,17 @@ preservation, and orderly teardown can fit.
 
 Keep dependency-complete preflight in compute; submit wrappers should only do
 control-plane-compatible preparation and the authorized qsub. Retain qsub's
-exit status, stdout and stderr. After an uncertain submission response, reconcile
-the job before retrying, to avoid duplicate jobs. A rejected resource request
+exit status, stdout and stderr. Monitor the returned job ID with the JSON helper.
+After an uncertain submission response, reconcile current/history JSON and job
+logs before retrying, to avoid duplicate jobs. A rejected resource request
 requires a corrected request, not an unchanged retry. Do not assume users may
 move a queued job with `qalter -q`; inspect the rejection and change scheduling
 only within the authorized scope.
 
 Use `type -a qsub`, `qsub --version`, and the local manual
 `/usr/local/share/man/man1/qsub.1` to identify the command and dialect.
-Unlike `qstat --help`, `qsub --help` was rejected on the inspected login host
+`qsub --help` was rejected on the inspected login host
 (2026-09-05); its generic usage output is not a list of site-approved resources.
-Incident provenance: [failure-lessons.md](failure-lessons.md).
 
 For MPI-based jobs, read [mpi.md](mpi.md) and the relevant framework reference
 before constructing the launcher.

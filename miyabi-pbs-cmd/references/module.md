@@ -4,22 +4,7 @@ Use this reference for `module`, `show_module`, compiler/runtime selection, and
 module setup inside PBS shells. Live output from the relevant Miyabi host takes
 precedence over historical module names or versions.
 
-## Prevent Pager Interference
-
-`module avail` and `module list` commonly write to stderr and may open a pager.
-In an automated terminal, disable the pager before inspection:
-
-```bash
-export PAGER=cat MODULES_PAGER=cat LMOD_PAGER=cat
-module list 2>&1 | cat
-module avail <software-name> 2>&1 | cat
-```
-
-Send a paged command by itself and wait for the shell prompt before sending the
-next command. If `(END)` or `--More--` appears, send `q`, set the pager variables,
-and rerun the command. Do not assume text typed into a pager reached the shell.
-
-## Discover A Module
+## Query Loaded And Available Modules As JSON
 
 On the inspected Miyabi-G login shell, Environment Modules 5.3.0 supports native
 JSON for discovery and loaded state (verified 2026-09-05):
@@ -27,39 +12,43 @@ JSON for discovery and loaded state (verified 2026-09-05):
 ```bash
 export PAGER=cat MODULES_PAGER=cat LMOD_PAGER=cat
 module --json list 2>&1
-module --json avail cuda 2>&1
+module --json avail <software-name> 2>&1
 ```
 
-Prefer these for structured queries. Check the exit status and keep diagnostics
-if a result is not JSON. Do not assume every `module` subcommand supports JSON;
-`help`/`show` are still useful as text. Check `module --version`/help when the
-target shell uses another implementation. See the
+Use these as the default discovery interface. Output commonly goes to stderr,
+hence `2>&1`; check the exit status and keep diagnostics if a result is not JSON.
+Use unfiltered JSON `avail` only when the software name is unknown. Prefer an
+exact module already used by the project, matching the target node group and
+compiler/MPI stack. See the
 [Modules JSON option](https://modules.readthedocs.io/en/latest/module.html#cmdoption-json).
 
-Start with the current shell state and a targeted search:
+## Text Details And Fallback
+
+Not every subcommand supports JSON. For a selected module's instructions or
+environment changes, use pager-safe text:
 
 ```bash
-module list 2>&1 | cat
-module avail <software-name> 2>&1 | cat
 module help <module/version> 2>&1 | cat
+module show <module/version> 2>&1 | cat
 ```
 
-Use an unfiltered `module avail 2>&1 | cat` only when the software name is
-unknown. Use `show_module` for the Miyabi catalog and `show_module -a` only when
-cross-system results are needed. Relevant fields include:
+Use `show_module` when the Miyabi catalog's node-group/compiler information is
+needed, and `show_module -a` only for cross-system results. Relevant fields are:
 
 - `ModuleName`: value accepted by `module load`;
 - `NodeGroup`: login or compute-node family where the module is available;
 - `BaseCompiler/MPI`: compiler and MPI stack expected by the module.
 
-Prefer an exact module already used by the project. Otherwise select from live
-output and match the target node group and compiler/MPI stack.
+If the target shell rejects JSON, check `module --version`/help and use targeted
+text `list`/`avail` with `2>&1 | cat`. If `(END)` or `--More--` appears, send `q`,
+set the pager variables above and rerun; wait for the prompt before sending
+another command. Text typed into a pager does not execute in the shell.
 
 ## Load And Inspect The Result
 
 ```bash
 module load <module/version>
-module list 2>&1 | cat
+module --json list 2>&1
 command -v <expected-command>
 <expected-command> --version
 ```
@@ -71,7 +60,7 @@ workload intentionally replaces the complete default stack.
 
 The Miyabi User's Guide v1.8 documents NVIDIA HPC SDK with `nv-hpcx` as the
 Miyabi-G default and Intel oneAPI with `impi` as the Miyabi-C default. Inspect
-`module list` rather than assuming the current versions or reloading defaults.
+the loaded-module JSON rather than assuming versions or reloading defaults.
 Module availability, architecture and compiler/MPI selection are target-shell
 properties; a module path visible from G login is not a C environment recipe.
 
@@ -107,8 +96,8 @@ cd "${PBS_O_WORKDIR:?PBS_O_WORKDIR is not set}"
 ```
 
 Replace every placeholder before submission. `REQUIRED_MODULES=()` is valid
-when the workload intentionally uses compute-node defaults; still capture
-`module list` in the job log.
+when the workload intentionally uses compute-node defaults. The text `module
+list` above is a durable job log; agent queries should use JSON where supported.
 
 For an interactive allocation, repeat discovery and loading after `qsub -I`
 returns the compute-node prompt. If a module configures Open MPI, also read

@@ -24,7 +24,6 @@ For `No space left on device`, inspect both byte quota and directory/file-count
 limits before changing the workload or retrying the operation.
 Keep temporary model trees and compiler caches outside small checked report
 packages; retain the required compact results and explicit artifact locations.
-See [failure-lessons.md](failure-lessons.md) for the observed path failures.
 
 Do not run `chhome`, move dotfiles, or alter shell startup files without an
 explicit user request. When editing shell initialization, do not globally put

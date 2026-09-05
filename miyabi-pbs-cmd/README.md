@@ -1,9 +1,10 @@
 # Miyabi Development
 
-`miyabi-development` is an agent-facing operating manual for the Miyabi
-supercomputer. It covers host classification, login-node safety, Environment
-Modules, PBS job submission and inspection, storage, and cluster-specific GPU
-or distributed launch patterns.
+`miyabi-development` provides agent-facing JSON helpers, PBS templates and
+operational guidance for Miyabi. Start with the helpers for host/allocation
+context and job queries; use native commands for uncovered queries or diagnostics.
+It also covers Environment Modules, Python environments, storage and distributed
+launch patterns.
 
 The skill determines where a command may run and how to use the cluster safely.
 Project development and acceptance policy remains with the project and user.
@@ -29,7 +30,6 @@ miyabi-development/
 └── references/
     ├── accelerate-pbs.md
     ├── filesystem-network.md
-    ├── failure-lessons.md
     ├── module.md
     ├── mpi.md
     ├── python-env.md
@@ -41,18 +41,17 @@ miyabi-development/
     └── vllm-miyabi.md
 ```
 
-`SKILL.md` contains routing and safety invariants. Each reference contains
-agent-relevant commands and Miyabi-specific behavior for one operational area.
+`SKILL.md` contains routing and safety invariants. References describe the
+interfaces and Miyabi-specific behavior for each operational area.
 `scripts/qstat_json.py` turns current-job and history tables into JSON using
 only Python's standard library. See [references/qstat.md](references/qstat.md)
-for invocation, fields, error handling, and offline validation.
+for invocation, fields, error handling, and native fallback coverage.
 `scripts/context.py` uses host Python 3.9 to report role, architecture and PBS
 evidence, with an optional compute guard. Compatible project environments may
 serve lightweight login tasks; tests and application runtime use the target
 allocation, respecting stricter project rules. The PBS assets contain the
 maintained templates; their validation limits are documented in
-[references/templates.md](references/templates.md). Incorporated incident
-provenance is indexed in [references/failure-lessons.md](references/failure-lessons.md).
+[references/templates.md](references/templates.md).
 
 ## Usage
 
@@ -72,3 +71,19 @@ Use $miyabi-development to run this workload in an interactive GPU allocation.
 
 Live Miyabi output and current site documentation take precedence over copied
 queue limits, module versions, and historical examples.
+
+## Validation
+
+Run the small standard-library offline regressions from this skill directory:
+
+```bash
+/usr/bin/python3 -m unittest discover -s tests -v
+```
+
+The job helper was checked against live current-job, completed-job and no-match
+queries on `miyabi-g1`. Its history fixture preserves observed table spacing with
+anonymized identifiers, names and projects; queued/array/MIG and malformed-output
+cases are synthetic regressions. Column definitions were checked against the
+local `/usr/local/share/man/man1/qstat.1`. These checks do not validate every
+scheduler state or a distributed workload. Context and template validation
+limits are documented in [references/templates.md](references/templates.md#validation-scope).

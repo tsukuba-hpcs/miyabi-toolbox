@@ -44,8 +44,8 @@ def train(*args, **kwargs):
 
 ## Notes
 
-- Discover exact modules with `module avail`, `show_module`, and `module help`
-  as described in [module.md](module.md). Replace or remove every module
+- Discover exact modules through the JSON queries in [module.md](module.md),
+  consulting catalog/help text when needed. Replace or remove every module
   placeholder before submission. Keep `REQUIRED_MODULES=()` only when the job
   intentionally uses the compute-node defaults, and still log `module list`.
 - This template is for direct `Accelerator()` use under `mpirun`; rank discovery

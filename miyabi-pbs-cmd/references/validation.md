@@ -13,10 +13,14 @@ Compatible project `.venv` tools may serve those lightweight tasks when project
 rules permit. For tests, runtime checks, incompatible tools, or checks covered
 by a stricter project rule, request the target system's interactive queue
 using [qsub.md](qsub.md), then retain its PTY across the continuous test window.
-In that shell, check allocation/architecture, load modules, and bind the actual
-project Python before Ruff, pytest, imports, generators or prepare-only checks.
+In that shell, require the [context helper's](../scripts/context.py)
+`--target-system <target> --require-compute` guard, inspect/load modules, and
+bind the actual project Python before Ruff, pytest, imports, generators or
+prepare-only checks.
 
-Inspect remaining walltime before starting the next group of checks. Preserve
+Use [JSON job queries](qstat.md#json-job-queries) to check the allocation's live
+state. Inspect walltime limits/usage with the
+[detail fallback](qstat.md#native-fallback) before the next group of checks. Preserve
 logs and finish processes before exiting. If time is insufficient, continue in
 a replacement target allocation within the existing authorization; an explicit
 user limit on allocation count still applies. When a session ends, confirm
@@ -85,10 +89,9 @@ limits, including the supervisor itself. Queue starvation is not application
 failure. Use bounded waits for the actual readiness event; avoid increasing
 timeouts or resubmitting unchanged runs without diagnosing the observed failure.
 
-Reconcile live and historical PBS state, application exits, and expected output
-readback. A running parent allocation does not prove every child/rank is alive;
+Reconcile live/history JSON job results, application exits, and expected output
+readback; use retained job details when exit status is needed. A running parent
+allocation does not prove every child/rank is alive;
 use rank/process evidence for failures inside one co-allocation. Preserve failed,
 interrupted, and unknown outcomes as such. Rerun the affected behavior after a
 correction; a metadata/source-ID change alone does not require all experiments.
-
-Related operational incidents: [failure-lessons.md](failure-lessons.md).

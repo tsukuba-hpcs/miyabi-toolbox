@@ -1,4 +1,4 @@
 interface:
   display_name: "Miyabi Development"
-  short_description: "Operate safely on Miyabi login and PBS compute nodes"
+  short_description: "Use Miyabi JSON helpers and PBS templates safely"
   default_prompt: "Use $miyabi-development to perform this Miyabi operation safely."
