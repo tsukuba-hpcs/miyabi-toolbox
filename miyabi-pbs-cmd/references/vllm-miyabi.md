@@ -167,12 +167,12 @@ MPI_ENV_ARGS=(
   "NCCL_DEBUG=$NCCL_DEBUG"
   "OMP_NUM_THREADS=$OMP_NUM_THREADS"
   "FLASHINFER_WORKSPACE_BASE=$FLASHINFER_WORKSPACE_BASE"
+  "RUNTIME_CC=${RUNTIME_CC:-}"
+  "RUNTIME_CXX=${RUNTIME_CXX:-}"
 )
 
 [[ -n "${VLLM_USE_FLASHINFER_SAMPLER:-}" ]] && \
   MPI_ENV_ARGS+=("VLLM_USE_FLASHINFER_SAMPLER=$VLLM_USE_FLASHINFER_SAMPLER")
-[[ -n "${CC:-}" ]] && MPI_ENV_ARGS+=("CC=$CC")
-[[ -n "${CXX:-}" ]] && MPI_ENV_ARGS+=("CXX=$CXX")
 
 mpirun \
   --mca mpi_abort_print_stack 1 \
@@ -182,6 +182,11 @@ mpirun \
   /usr/bin/env "${MPI_ENV_ARGS[@]}" \
   bash -lc '
     set -euo pipefail
+    cd "$PROJECT_ROOT"
+    # A login shell may reapply the site compiler; apply diagnosed overrides last.
+    [[ -z "${RUNTIME_CC:-}" ]] || export CC="$RUNTIME_CC"
+    [[ -z "${RUNTIME_CXX:-}" ]] || export CXX="$RUNTIME_CXX"
+    export PYTHON_BIN
     echo "vllm rank=${OMPI_COMM_WORLD_RANK:?}/${OMPI_COMM_WORLD_SIZE:?} host=$(hostname)"
     exec "$PYTHON_BIN" "$ENTRYPOINT" "$@"
   ' bash "${EVAL_ARGS[@]}" 2>&1 | tee "$LOG_ROOT/eval.log"
@@ -189,6 +194,10 @@ mpirun \
 
 Do not combine this `/usr/bin/env` pattern with `mpirun -x` or MCA environment
 lists. Keep the MPI parent unbound unless an explicit CPU-affinity plan exists.
+Preserve the absolute virtualenv interpreter symlink as described in
+[python-env.md](python-env.md). Set `RUNTIME_CC`/`RUNTIME_CXX` only for a diagnosed
+compiler issue; [mpi.md](mpi.md) explains why overrides belong inside the child
+login shell and how to verify the affected compile path.
 Do not copy a rank-0 GPU UUID list to every node through `MPI_ENV_ARGS`; preserve
 PBS/site node-local device visibility and print it from every rank. If the
 launcher replaces node-local visibility with rank-0 values, stop and adapt a

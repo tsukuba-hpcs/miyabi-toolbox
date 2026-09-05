@@ -1,0 +1,5 @@
+Miyabi scheduled stop time: 2026/09/25(Fri) 09:00:00 (Remain: 19days 20:30:28)
+
+JOB_ID            JOB_NAME                                                         STATUS    PROJECT    QUEUE           START_DATE       ELAPSE        TOKEN NODE MIG
+1234001           STDIN                                                            FINISH    example1   interact-g_n1   09/04 04:26:27   00:01:55          -    1   -
+1234002           example_full_protocol                                            FINISH    example1   debug-g         09/04 04:30:53   00:10:44        1.6    9   -

@@ -14,20 +14,45 @@ Project development and acceptance policy remains with the project and user.
 miyabi-development/
 ├── agents/openai.yaml
 ├── SKILL.md
+├── scripts/
+│   ├── context.py
+│   └── qstat_json.py
+├── assets/pbs/
+│   ├── single-node.pbs
+│   ├── torchrun.pbs
+│   └── mpi-workers.pbs
+├── tests/
+│   ├── fixtures/qstat_history.txt
+│   ├── test_context.py
+│   ├── test_pbs_templates.py
+│   └── test_qstat_json.py
 └── references/
     ├── accelerate-pbs.md
     ├── filesystem-network.md
+    ├── failure-lessons.md
     ├── module.md
     ├── mpi.md
     ├── python-env.md
     ├── qstat.md
     ├── qsub.md
     ├── torchrun-pbs.md
+    ├── templates.md
+    ├── validation.md
     └── vllm-miyabi.md
 ```
 
 `SKILL.md` contains routing and safety invariants. Each reference contains
 agent-relevant commands and Miyabi-specific behavior for one operational area.
+`scripts/qstat_json.py` turns current-job and history tables into JSON using
+only Python's standard library. See [references/qstat.md](references/qstat.md)
+for invocation, fields, error handling, and offline validation.
+`scripts/context.py` uses host Python 3.9 to report role, architecture and PBS
+evidence, with an optional compute guard. Compatible project environments may
+serve lightweight login tasks; tests and application runtime use the target
+allocation, respecting stricter project rules. The PBS assets contain the
+maintained templates; their validation limits are documented in
+[references/templates.md](references/templates.md). Incorporated incident
+provenance is indexed in [references/failure-lessons.md](references/failure-lessons.md).
 
 ## Usage
 

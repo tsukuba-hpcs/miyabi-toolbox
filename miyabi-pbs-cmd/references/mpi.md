@@ -43,3 +43,32 @@ correct mapping.
 Print hostnames, ranks, world size, rendezvous address, and binding information
 before the workload starts. Follow an existing Miyabi project launcher when it
 imposes stricter placement or environment rules.
+
+## Preserve The Runtime In The Actual Rank Shell
+
+Pass an absolute **virtualenv** `PYTHON_BIN` without resolving the interpreter
+symlink. Set `cd "$PROJECT_ROOT"` inside the rank shell and export the same
+interpreter for any nested tools. Do not infer child environment correctness
+from a successful parent-side import; check the actual launcher path.
+
+`bash -lc` can reload modules/site defaults and replace `CC`, even when the MPI
+parent already exported a different compiler. If an observed Triton/Inductor
+build fails under the module-provided `nvc`, diagnose it in a small target
+allocation. If the pinned stack succeeds with GNU, pass the selected path under
+a separate name such as `RUNTIME_CC`, then export `CC="$RUNTIME_CC"` **inside**
+the login child shell immediately before Python. Apply `RUNTIME_CXX` similarly
+when the failure involves C++. Inspect the effective values per rank.
+
+This is a symptom-dependent compiler override, not a universal switch away
+from the site compiler. A warm compiler cache can hide the failure; verify the
+affected compile path with a fresh task-local cache and the same shell/launcher
+before resubmission. Do not delete shared caches or disable compilation across
+all workloads as a default workaround.
+
+Create shared log/publication parents before MPI starts. A co-allocated PBS
+job can remain RUNNING after one actor has failed, so check launcher exit and
+rank/process results independently of the parent job state. For several
+independent actor jobs, account for scheduler startup and project limits before
+deciding that a missing application-ready signal means runtime failure.
+
+Sources and scope: [failure-lessons.md](failure-lessons.md).

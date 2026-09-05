@@ -21,6 +21,21 @@ and rerun the command. Do not assume text typed into a pager reached the shell.
 
 ## Discover A Module
 
+On the inspected Miyabi-G login shell, Environment Modules 5.3.0 supports native
+JSON for discovery and loaded state (verified 2026-09-05):
+
+```bash
+export PAGER=cat MODULES_PAGER=cat LMOD_PAGER=cat
+module --json list 2>&1
+module --json avail cuda 2>&1
+```
+
+Prefer these for structured queries. Check the exit status and keep diagnostics
+if a result is not JSON. Do not assume every `module` subcommand supports JSON;
+`help`/`show` are still useful as text. Check `module --version`/help when the
+target shell uses another implementation. See the
+[Modules JSON option](https://modules.readthedocs.io/en/latest/module.html#cmdoption-json).
+
 Start with the current shell state and a targeted search:
 
 ```bash
@@ -57,11 +72,17 @@ workload intentionally replaces the complete default stack.
 The Miyabi User's Guide v1.8 documents NVIDIA HPC SDK with `nv-hpcx` as the
 Miyabi-G default and Intel oneAPI with `impi` as the Miyabi-C default. Inspect
 `module list` rather than assuming the current versions or reloading defaults.
+Module availability, architecture and compiler/MPI selection are target-shell
+properties; a module path visible from G login is not a C environment recipe.
 
 ## Load Modules In Every PBS Shell
 
-Module state is shell-local. Loading a module on a login node does not load it
-inside an interactive allocation or batch job.
+Module state is shell-local. Establish the intended stack explicitly in every
+allocation; do not assume login state was inherited correctly. Running `module
+load` inside a separate Python/subprocess shell does not change the caller's
+environment. A login shell started by an MPI launcher can reapply site defaults
+after environment variables were passed to it; set intentional workload
+overrides after that initialization, immediately before Python (see [mpi.md](mpi.md)).
 
 For a batch script, place module setup after PBS directives and before project
 commands:

@@ -14,96 +14,14 @@ Python module.
 
 ## PBS Template
 
-Before writing the PBS directive, derive the project group with `groups` and fill the literal group value into `#PBS -W group_list=...`; PBS directives do not expand shell variables.
+Select the project/user PBS group as described in [qsub.md](qsub.md); fill it
+as a literal because PBS directives do not expand shell variables.
 
-```bash
-#!/bin/bash
-#PBS -q regular-g
-#PBS -W group_list=<group_id_from_groups>
-#PBS -l select=<num_nodes>:mpiprocs=<processes_per_node>
-#PBS -l walltime=01:00:00
-#PBS -j oe
-#PBS -m ae
+Copy [../assets/pbs/mpi-workers.pbs](../assets/pbs/mpi-workers.pbs)
+and follow [templates.md](templates.md) to set the target, paths, modules and
+resource shape. That file is the maintained script; this reference explains
+the launcher contract.
 
-set -eEuo pipefail
-trap 'echo "[ERROR] Failed at line $LINENO" >&2' ERR
-
-export PAGER=cat MODULES_PAGER=cat LMOD_PAGER=cat
-REQUIRED_MODULES=(
-  "<compiler-or-runtime-module/version>"
-  "<mpi-module/version>"
-)
-for module_name in "${REQUIRED_MODULES[@]}"; do
-  module load "$module_name"
-done
-module list 2>&1 | cat
-
-PROJECT_ROOT="${PROJECT_ROOT:-${PBS_O_WORKDIR:-$PWD}}"
-PYTHON_BIN="${PYTHON_BIN:-$PROJECT_ROOT/.venv/bin/python}"
-PYTHON_MODULE="${PYTHON_MODULE:-src.cli}"
-
-if [[ -z "${MASTER_PORT:-}" ]]; then
-  job_id="${PBS_JOBID:-}"
-  job_number="${job_id%%.*}"
-  if [[ "$job_number" =~ ^[0-9]+$ ]]; then
-    MASTER_PORT=$((20000 + job_number % 20000))
-  else
-    MASTER_PORT=29500
-  fi
-fi
-
-: "${PBS_NODEFILE:?PBS_NODEFILE is not set}"
-cd "$PROJECT_ROOT"
-
-NNODES=$(awk '!seen[$0]++ {count++} END {print count}' "$PBS_NODEFILE")
-WORLD_SIZE=$(wc -l < "$PBS_NODEFILE")
-if (( NNODES == 0 )); then
-  echo "PBS_NODEFILE is empty" >&2
-  exit 1
-fi
-if (( WORLD_SIZE % NNODES != 0 )); then
-  echo "WORLD_SIZE=$WORLD_SIZE is not divisible by NNODES=$NNODES" >&2
-  exit 1
-fi
-NPROC_PER_NODE="${NPROC_PER_NODE:-$((WORLD_SIZE / NNODES))}"
-MASTER_ADDR="${MASTER_ADDR:-$(head -n 1 "$PBS_NODEFILE")}"
-
-timestamp=$(date "+%Y%m%d%H%M%S")
-LOG_ROOT="${LOG_ROOT:-$PROJECT_ROOT/logs/qsub_${timestamp}}"
-mkdir -p "$LOG_ROOT"
-
-MPI_ENV_ARGS=(
-  "MASTER_ADDR=$MASTER_ADDR"
-  "MASTER_PORT=$MASTER_PORT"
-  "PROJECT_ROOT=$PROJECT_ROOT"
-  "PYTHON_BIN=$PYTHON_BIN"
-  "PYTHON_MODULE=$PYTHON_MODULE"
-)
-
-echo "NNODES=$NNODES NPROC_PER_NODE=$NPROC_PER_NODE WORLD_SIZE=$WORLD_SIZE"
-echo "MASTER_ADDR=$MASTER_ADDR MASTER_PORT=$MASTER_PORT"
-
-TRAIN_ARGS=(
-  train
-  --config "<config_or_args>"
-)
-
-mpirun \
-  --mca mpi_abort_print_stack 1 \
-  --report-bindings \
-  --bind-to none \
-  -np "$WORLD_SIZE" \
-  /usr/bin/env "${MPI_ENV_ARGS[@]}" \
-  bash -lc '
-    set -euo pipefail
-    export RANK="${OMPI_COMM_WORLD_RANK:?OMPI_COMM_WORLD_RANK is not set}"
-    export WORLD_SIZE="${OMPI_COMM_WORLD_SIZE:?OMPI_COMM_WORLD_SIZE is not set}"
-    export LOCAL_RANK="${OMPI_COMM_WORLD_LOCAL_RANK:?OMPI_COMM_WORLD_LOCAL_RANK is not set}"
-    export LOCAL_WORLD_SIZE="${OMPI_COMM_WORLD_LOCAL_SIZE:?OMPI_COMM_WORLD_LOCAL_SIZE is not set}"
-    echo "accelerate rank=${RANK}/${WORLD_SIZE} local_rank=${LOCAL_RANK}/${LOCAL_WORLD_SIZE} host=$(hostname)"
-    exec "$PYTHON_BIN" -m "$PYTHON_MODULE" "$@"
-  ' bash "${TRAIN_ARGS[@]}" 2>&1 | tee "$LOG_ROOT/train.log"
-```
 
 ## Python Entrypoint Expectations
 
