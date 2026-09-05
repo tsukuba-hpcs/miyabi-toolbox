@@ -1,31 +1,31 @@
-# Python Environment
+# Python Environment Tips
 
-Prefer `uv` for Python environment and dependency management when the project
-does not already standardize on another tool.
+Use the project's existing environment tool and version pins. Do not replace a
+working environment merely to conform to this reference.
 
-- Prefer a project-local virtual environment at `<project_root>/.venv`.
-- Before creating a new environment, inspect the project for existing `.venv/`, active `$VIRTUAL_ENV`, `pyproject.toml`, `uv.lock`, `.python-version`, `requirements*.txt`, `environment.yml`, or local docs.
-- Select Python from project pins and the compatibility range of required ML
-  packages. Do not impose a global version on an existing project.
-- If the project is unpinned, identify a mutually supported version before
-  installing large dependency stacks and record the choice.
+Before creating or changing an environment, inspect:
 
-Create a default environment only when appropriate for the node:
+```text
+.venv/
+pyproject.toml
+uv.lock
+.python-version
+requirements*.txt
+environment.yml
+```
+
+Prefer a project-local `.venv` when the project has no established alternative.
+If the project uses `uv`, common commands are:
 
 ```bash
 uv venv --python <compatible-python-version> .venv
-```
-
-Common install/run commands:
-
-```bash
 uv sync
 uv pip install -r requirements.txt
 uv run python <script.py>
 ```
 
-On login nodes, creating a bare `.venv` is acceptable when it does not execute
-project code. Avoid resolving, building, or installing heavy GPU/ML dependency
-stacks on a login node; do that in an interactive node or a PBS job when it is
-substantial. Do not rebuild a working environment merely to conform to this
-reference.
+On a login node, creating an empty virtual environment is acceptable when it
+does not execute project code. Resolve, build, or install substantial GPU and
+ML dependency stacks in an interactive compute allocation or batch job. Select
+Python from project pins and package compatibility; do not impose a global
+version or perform unbounded dependency upgrades.

@@ -1,4 +1,4 @@
 interface:
   display_name: "Miyabi Development"
-  short_description: "Develop and validate ML workloads safely on Miyabi"
-  default_prompt: "Use $miyabi-development to review and validate this Miyabi-targeted change safely."
+  short_description: "Operate safely on Miyabi login and PBS compute nodes"
+  default_prompt: "Use $miyabi-development to perform this Miyabi operation safely."

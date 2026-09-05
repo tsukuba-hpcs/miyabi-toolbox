@@ -150,17 +150,16 @@ dist.destroy_process_group()
 ## Notes
 
 - Discover exact modules with `module avail`, `show_module`, and `module help`
-  as described in `miyabi-operations.md`. Replace or remove every module
+  as described in [module.md](module.md). Replace or remove every module
   placeholder before submission. Keep `REQUIRED_MODULES=()` only when the job
   intentionally uses the compute-node defaults, and still log `module list`.
 - Keep `#PBS -l select=<num_nodes>:mpiprocs=1` for the `mpirun -> torchrun` pattern. `torchrun`, not MPI, creates local worker processes.
 - Set `NPROC_PER_NODE` to the number of local GPU workers each `torchrun` should spawn.
-- Keep the MPI supervisor unbound unless the project defines a tested CPU
+- Keep the MPI supervisor unbound unless the project defines an explicit CPU
   affinity plan; child workers can inherit an overly narrow supervisor
   affinity.
 - Give every concurrent worker group a distinct `RDZV_ID` and non-conflicting
   rendezvous port. `$PBS_JOBID` is a suitable default rendezvous id and input
   for a job-specific port; override `MASTER_PORT` if site policy requires it.
-- For early debugging, make the Python code switchable to `DIST_BACKEND=gloo`, small data, CPU, or one rank.
 - Re-check rendezvous flags against the current
   [PyTorch torchrun documentation](https://docs.pytorch.org/docs/stable/elastic/run.html).

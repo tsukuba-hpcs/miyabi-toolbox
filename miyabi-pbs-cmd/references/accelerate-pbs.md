@@ -127,7 +127,7 @@ def train(*args, **kwargs):
 ## Notes
 
 - Discover exact modules with `module avail`, `show_module`, and `module help`
-  as described in `miyabi-operations.md`. Replace or remove every module
+  as described in [module.md](module.md). Replace or remove every module
   placeholder before submission. Keep `REQUIRED_MODULES=()` only when the job
   intentionally uses the compute-node defaults, and still log `module list`.
 - This template is for direct `Accelerator()` use under `mpirun`; rank discovery
@@ -141,6 +141,5 @@ def train(*args, **kwargs):
   should match or be intentionally overridden.
 - Derive a job-specific default port from `$PBS_JOBID`, but allow
   `MASTER_PORT` to override it when project policy reserves a port range.
-- Use `accelerate test --config_file <config>` only on an interactive/compute node, never on a login node.
 - Re-check launcher flags against the current
   [Accelerate CLI documentation](https://huggingface.co/docs/accelerate/package_reference/cli).

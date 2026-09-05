@@ -6,8 +6,8 @@ main skill first: do not import vLLM, install a GPU stack, load a model, or run
 inference on a login node.
 
 This file records both durable launch rules and version-scoped workarounds.
-Reproduce the failure with the project's pinned versions before applying a
-workaround that changes compiler, sampler, or device visibility.
+Apply a workaround that changes compiler, sampler, or device visibility only
+when the corresponding failure is observed with the project's pinned versions.
 
 ## Contents
 
@@ -16,7 +16,6 @@ workaround that changes compiler, sampler, or device visibility.
 - [Safe CUDA Device Handling](#safe-cuda-device-handling)
 - [PBS And MPI Pattern](#pbs-and-mpi-pattern)
 - [LoRA Evaluation Pattern](#lora-evaluation-pattern)
-- [Debug Workflow](#debug-workflow)
 
 ## Version And Installation Discipline
 
@@ -27,7 +26,7 @@ Inspect the current environment on a compute node before changing it:
 uv pip freeze | grep -E '^(torch|vllm|triton|flashinfer)='
 ```
 
-Prefer the project's lockfile or an exact version validated with its PyTorch and
+Prefer the project's lockfile or an exact version compatible with its PyTorch and
 CUDA stack. Avoid an unbounded install such as `vllm>=...`, which can replace
 PyTorch or transitive GPU packages unexpectedly.
 
@@ -37,7 +36,7 @@ compilers without changing the requested vLLM version:
 
 ```bash
 CC="$(command -v gcc)" CXX="$(command -v g++)" \
-  uv pip install "vllm==<validated-version>"
+  uv pip install "vllm==<project-version>"
 ```
 
 Capture `uv pip freeze` before and after installation and re-check both
@@ -67,14 +66,14 @@ them as symptom-driven and version-scoped:
   llm = LLM(..., enforce_eager=True)
   ```
 
-Retest without diagnostic workarounds after the underlying environment issue
-is fixed; do not turn every workaround into a permanent performance default.
+Remove diagnostic workarounds after the underlying environment issue is fixed;
+do not turn every workaround into a permanent performance default.
 
 ## Safe CUDA Device Handling
 
 Preserve the scheduler-provided `CUDA_VISIBLE_DEVICES` by default. Current
-vLLM releases have explicit logical-to-physical device mapping, so first test
-the pinned version before rewriting this variable.
+vLLM releases have explicit logical-to-physical device mapping. Preserve the
+scheduler value unless the pinned version reports a parsing failure.
 
 Some older versions failed while parsing PBS-provided GPU UUIDs such as
 `GPU-...`. If that exact failure is reproduced, translate every UUID to its
@@ -134,7 +133,7 @@ process per node. Do not use it as a substitute for vLLM's documented
 tensor-parallel or data-parallel launcher when the model itself spans workers.
 
 Before this snippet runs, discover the required compiler/MPI/CUDA modules and
-load them in the PBS job shell as described in `miyabi-operations.md`. Record a
+load them in the PBS job shell as described in [module.md](module.md). Record a
 pager-free `module list` in the job log; do not rely on login-shell module
 state.
 
@@ -189,7 +188,7 @@ mpirun \
 ```
 
 Do not combine this `/usr/bin/env` pattern with `mpirun -x` or MCA environment
-lists. Keep the MPI parent unbound unless a tested CPU-affinity plan exists.
+lists. Keep the MPI parent unbound unless an explicit CPU-affinity plan exists.
 Do not copy a rank-0 GPU UUID list to every node through `MPI_ENV_ARGS`; preserve
 PBS/site node-local device visibility and print it from every rank. If the
 launcher replaces node-local visibility with rank-0 values, stop and adapt a
@@ -220,7 +219,7 @@ llm = LLM(
     dtype="auto",
     tensor_parallel_size=1,
     gpu_memory_utilization=0.80,
-    enforce_eager=True,  # diagnostic default; retest without it when stable
+    enforce_eager=True,  # diagnostic only; remove after resolving the failure
     enable_lora=True,
     max_lora_rank=lora_rank,
 )
@@ -235,22 +234,6 @@ outputs = llm.generate(
 For rank-sharded evaluation, write rank-local CSV/JSON files and a done marker.
 Let rank 0 merge only after every expected marker exists. Avoid concurrent
 writes to one output file.
-
-## Debug Workflow
-
-1. On the login node, inspect code and run only static checks that do not import
-   vLLM.
-2. Request a 1-node interactive allocation and confirm the compute hostname,
-   PBS job id, `nvidia-smi -L`, visible devices, Python path, and pinned package
-   versions.
-3. Reproduce the failure before applying a workaround. Change one variable at
-   a time and record the before/after environment.
-4. Load the real model/backend and run a tiny inference request. Inspect text,
-   output artifacts, GPU ownership, and the log for the backend actually used.
-5. Check `qstat "$PBS_JOBID"` after each attempt; request a fresh allocation
-   when the next complete attempt will not fit.
-6. Move to 2 nodes only after 1 node passes and the task requires rank-sharded
-   or multi-node behavior. Confirm every expected rank and artifact.
 
 Re-check device and LoRA behavior against the current
 [vLLM platform](https://docs.vllm.ai/en/stable/api/vllm/platforms/index.html)
