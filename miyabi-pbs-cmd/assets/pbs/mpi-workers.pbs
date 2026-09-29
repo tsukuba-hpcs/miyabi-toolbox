@@ -28,7 +28,7 @@ PROJECT_ROOT="<absolute_project_or_snapshot_root>"
 PYTHON_BIN="${PYTHON_BIN:-$PROJECT_ROOT/.venv/bin/python}"
 # Preserve the virtualenv symlink; do not use realpath/readlink -f here.
 [[ "$PYTHON_BIN" = /* && -x "$PYTHON_BIN" ]] || { echo "Set an absolute executable PYTHON_BIN" >&2; exit 1; }
-PYTHON_MODULE="${PYTHON_MODULE:-src.cli}"
+PYTHON_MODULE="${PYTHON_MODULE:-<python_module>}"
 RUNTIME_CC="${RUNTIME_CC:-}"
 RUNTIME_CXX="${RUNTIME_CXX:-}"
 export PYTHON_BIN
@@ -81,10 +81,8 @@ MPI_ENV_ARGS=(
 echo "NNODES=$NNODES NPROC_PER_NODE=$NPROC_PER_NODE WORLD_SIZE=$WORLD_SIZE"
 echo "MASTER_ADDR=$MASTER_ADDR MASTER_PORT=$MASTER_PORT"
 
-TRAIN_ARGS=(
-  train
-  --config "<config_or_args>"
-)
+# Replace with the project's actual argv, preserving array quoting.
+TRAIN_ARGS=("<argument>")
 
 mpirun \
   --mca mpi_abort_print_stack 1 \
@@ -103,7 +101,7 @@ mpirun \
     export WORLD_SIZE="${OMPI_COMM_WORLD_SIZE:?OMPI_COMM_WORLD_SIZE is not set}"
     export LOCAL_RANK="${OMPI_COMM_WORLD_LOCAL_RANK:?OMPI_COMM_WORLD_LOCAL_RANK is not set}"
     export LOCAL_WORLD_SIZE="${OMPI_COMM_WORLD_LOCAL_SIZE:?OMPI_COMM_WORLD_LOCAL_SIZE is not set}"
-    echo "accelerate rank=${RANK}/${WORLD_SIZE} local_rank=${LOCAL_RANK}/${LOCAL_WORLD_SIZE} host=$(hostname)"
+    echo "worker rank=${RANK}/${WORLD_SIZE} local_rank=${LOCAL_RANK}/${LOCAL_WORLD_SIZE} host=$(hostname)"
     echo "architecture=$(uname -m) python=$PYTHON_BIN CC=${CC:-unset} CXX=${CXX:-unset}"
     [[ "$(uname -m)" == aarch64 ]] || { echo "Miyabi-G worker architecture mismatch" >&2; exit 1; }
     exec "$PYTHON_BIN" -m "$PYTHON_MODULE" "$@"

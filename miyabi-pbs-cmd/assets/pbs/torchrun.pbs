@@ -24,12 +24,12 @@ for module_name in "${REQUIRED_MODULES[@]}"; do
 done
 module list 2>&1 | cat
 
-# Bind formal runs to the chosen code/config snapshot, not a changing cwd.
+# Use the project's intended checkout or code/config snapshot.
 PROJECT_ROOT="<absolute_project_or_snapshot_root>"
 PYTHON_BIN="${PYTHON_BIN:-$PROJECT_ROOT/.venv/bin/python}"
 # Preserve the virtualenv symlink; do not use realpath/readlink -f here.
 [[ "$PYTHON_BIN" = /* && -x "$PYTHON_BIN" ]] || { echo "Set an absolute executable PYTHON_BIN" >&2; exit 1; }
-ENTRYPOINT="${ENTRYPOINT:-$PROJECT_ROOT/train.py}"
+ENTRYPOINT="${ENTRYPOINT:-$PROJECT_ROOT/<entrypoint.py>}"
 NPROC_PER_NODE="<local_workers_per_node>"
 [[ "$NPROC_PER_NODE" =~ ^[1-9][0-9]*$ ]] || { echo "Set a positive local worker count" >&2; exit 1; }
 RDZV_ID="${RDZV_ID:-$PBS_JOBID}"
@@ -84,10 +84,8 @@ echo "RDZV_ID=$RDZV_ID"
 echo "PROJECT_ROOT=$PROJECT_ROOT"
 echo "LOG_ROOT=$LOG_ROOT"
 
-TRAIN_ARGS=(
-  --config "<config.yaml>"
-  --experiment-name "<experiment_name>"
-)
+# Replace with the project's actual argv, preserving array quoting.
+TRAIN_ARGS=("<argument>")
 
 mpirun \
   --mca mpi_abort_print_stack 1 \

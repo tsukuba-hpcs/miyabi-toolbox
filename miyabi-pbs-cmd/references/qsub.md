@@ -1,165 +1,84 @@
-# qsub Tips
+# PBS Submission And Interactive Sessions
 
-Use this reference for interactive allocations, PBS batch scripts, and job
-submission. Submission consumes shared resources and changes scheduler state;
-run `qsub` only within the user's authorized scope.
+## Select Resources From Current Site State
 
-## Inspect Current Site State
+Use [qstat's resource, limit and occupancy queries](qstat.md#native-fallback)
+before selecting a queue or resource shape. Check node/MIG counts, memory,
+maximum and remaining walltime, and project limits. Size walltime from comparable
+job usage and application logs, including startup and output preservation.
+Occupancy is useful context, not a prediction of start time.
 
-Use the [JSON job helper](qstat.md#json-job-queries) for current jobs and
-comparable history. Before choosing resources, inspect current queue shapes,
-project limits and occupancy using the [unwrapped queries](qstat.md#native-fallback);
-the helper does not yet expose these resource views.
+Miyabi uses parent routing queues: submit to `regular-g`/`regular-c` or
+`interact-g`/`interact-c`, not their indented destinations such as `small-g` or
+`interact-g_n1`. `debug-*` and `short-*` are options for eligible short batch
+work. Available queues and limits vary by project; use live output instead of a
+copied capacity table. Include supervisor jobs when checking concurrency limits.
 
-The following Miyabi-G reference was checked with the live resource view on
-2026-09-05. Read current limits before choosing resources:
+Use the project/user's PBS group. If unspecified, compare `groups` with the
+eligible projects in `qstat --limit`/`--rsc -x`; infer it only when exactly one
+choice fits. Resolve ambiguous accounting projects before submission.
 
-| Submit with | Nodes | Maximum walltime | Scheduler destination |
-| --- | ---: | ---: | --- |
-| `-q interact-g` | 1 | `02:00:00` | `interact-g_n1` |
-| `-q interact-g` | 2–8 | `00:10:00` | `interact-g_n8` |
-| `-q debug-g` | 1–16 | `00:30:00` | `debug-g` |
-| `-q short-g` | 1–8 | `08:00:00` | `short-g` |
-| `-q regular-g` | 1–16 | `48:00:00` | `small-g` |
-| `-q regular-g` | 17–64 | `48:00:00` | `medium-g` |
-| `-q regular-g` | 65–128 | `48:00:00` | `large-g` |
-| `-q regular-g` | 129–256 | `24:00:00` | `x-large-g` |
+The installed `/usr/local/share/man/man1/qsub.1` documents required `-q`,
+`-W group_list=...` and `-l select=N`, with chunk resources such as `mpiprocs`,
+`ompthreads` and `mem`. Do not transplant generic `ngpus` flags: Miyabi selects
+GPU/MIG resources through the site queue and select shape. Use `type -a qsub`
+and `qsub --version` for command diagnosis.
 
-Submit only to the parent queues shown in the first column. PBS assigns
-`small-g`, `medium-g`, `large-g`, `x-large-g`, `interact-g_n1`, or
-`interact-g_n8`; never pass those destination names to `qsub -q`.
+## Interactive Work
 
-Choose the queue and walltime in this order:
-
-1. Determine the required node count and estimate elapsed time from the actual
-   workload and comparable completed jobs. Inspect `resources_used.walltime`
-   and the corresponding application logs rather than copying an unrelated
-   request.
-2. Include margin for initialization, runtime variation, output preservation,
-   and orderly teardown. Ten minutes is a useful initial estimate for some
-   ML checks, not a mandatory minimum; use measured task costs and queue limits.
-3. Exclude every queue whose node range or maximum walltime cannot satisfy the
-   request.
-4. Compare current `Used/Total(Node)` values from the occupancy query among the
-   remaining queues. Prefer an eligible queue with enough free capacity; do
-   not treat a recorded utilization snapshot as current state.
-5. Prefer an eligible debug/short queue for a genuinely short batch workload.
-   Occupancy alone does not predict start time: inspect project job/node limits
-   and scheduler comments too. Account for both supervisors and their child jobs
-   before running several experiments concurrently.
-
-Current Miyabi output is authoritative when it differs from this table.
-
-Use the project/user's PBS group. If none is specified, compare `groups` with
-the projects shown by the resource/limit queries; infer it only when there is one
-eligible choice. Multiple valid groups require resolving the intended allocation
-or accounting project, not choosing the first account group.
+Use a PTY and keep its session ID so later commands reach the same allocation.
+For a one-node G session, after choosing the accounting group and walltime:
 
 ```bash
-: "${GROUP_ID:?Set the project/user-selected PBS group}"
-printf 'GROUP_ID=%s\n' "$GROUP_ID"
+qsub -I -q interact-g -W group_list="${GROUP_ID:?Set the PBS group}" \
+  -l select=1 -l walltime=00:30:00
 ```
 
-Use a literal group in `#PBS -W group_list=...`; PBS directives do not expand
-shell variables.
+For C, select `interact-c` and the C environment. The 2026-09-05 live view
+permits one node for up to two hours on either system; multi-node interactive
+limits are shorter (G: 2–8 nodes, C: 2 nodes, up to ten minutes). Recheck before
+requesting a different shape; use `select=N:mpiprocs=P` when placement needs it.
 
-## Request An Interactive Allocation
-
-Select the target from the workload, not the login architecture. A typical
-one-node Miyabi-G allocation is:
-
-```bash
-qsub -I \
-  -q interact-g \
-  -W group_list="$GROUP_ID" \
-  -l select=1 \
-  -l walltime=00:30:00
-```
-
-After the prompt changes, guard the target context and query the allocation.
-`SKILL_ROOT` is the installed skill's absolute directory:
+After the compute prompt appears, follow [context and module setup](../SKILL.md).
+Set `SKILL_ROOT` in that shell and check the actual allocation:
 
 ```bash
-SKILL_ROOT="/absolute/path/to/miyabi-development"
 /usr/bin/python3 -I "$SKILL_ROOT/scripts/context.py" \
   --target-system Miyabi-G --require-compute
 /usr/bin/python3 -I "$SKILL_ROOT/scripts/qstat_json.py" "${PBS_JOBID:?}"
-cd <project_root>
 ```
 
-Require guard success before project execution. Keep the same terminal session
-while the allocation is needed and load modules in this shell. Inspect walltime
-limits/usage via the [job-detail fallback](qstat.md#native-fallback), preserve
-required files, stop background processes, and `exit` cleanly when finished.
-Follow [validation.md](validation.md) to keep failed check commands from closing
-the persistent shell and to renew the allocation within the authorized scope.
-
-Use `interact-g` for G interactive requests; a recorded `qsub -I -q regular-g`
-request was rejected. For a C target, the live 2026-09-05 resource view lists
-`interact-c` (one node up to two hours, two nodes up to ten minutes); recheck it
-and choose the matching x86_64 environment. Do not copy G module/MPI settings
-into a C job without checking the target stack.
-
-Miyabi's established `interact-g` request uses `select=1` and explicit
-`-W group_list=...`. Recorded attempts with `select=1:ngpus=1`, a separate
-`-l ngpus=1`, or a missing group were rejected before allocation. The queue
-supplies its GPU resource; do not transplant generic PBS GPU flags. Consult
-the local qsub manual and live queue definition for other resource shapes.
-
-For a multi-node interactive allocation, request between 2 and 8 nodes only
-when the operation requires them. Its walltime cannot exceed 10 minutes:
+Use the actual target in the guard and require success before project execution.
+Inspect remaining walltime with [job details](qstat.md#native-fallback).
+To keep a failed check from closing the persistent shell, run checks in a child:
 
 ```bash
-qsub -I \
-  -q interact-g \
-  -W group_list="$GROUP_ID" \
-  -l select=2:mpiprocs=1 \
-  -l walltime=00:10:00
+# Set CHECK_SCRIPT and a durable LOG_ROOT for this attempt.
+export CHECK_SCRIPT LOG_ROOT
+mkdir -p "$LOG_ROOT"
+bash -o pipefail -c 'bash "$CHECK_SCRIPT" 2>&1 | tee "$LOG_ROOT/validation.log"'
 ```
 
-## Prepare A Batch Script
+The check script should stop on required failures; inspect the returned status.
+When time is insufficient, preserve outputs and continue in another allocation
+only within existing resource/count authorization. After exit or disconnection,
+recheck host context; a lost allocation does not permit login-side runtime.
 
-Use project scripts as the primary template, or adapt
-[single-node.pbs](../assets/pbs/single-node.pbs),
-[torchrun.pbs](../assets/pbs/torchrun.pbs), or
-[mpi-workers.pbs](../assets/pbs/mpi-workers.pbs). Their setup and validation
-status are described in [templates.md](templates.md).
+## Batch Work
 
-Before submission:
+Use an existing project script or fill a [PBS template](templates.md). Bind
+queued experiments to the intended stable code/configuration snapshot when the
+project requires reproducibility. A submitted script is copied by PBS; referenced
+source and environment files still come from their paths when the job runs.
 
-1. Run `bash -n <script>` without executing the workload.
-2. Replace every placeholder with a project- or site-supported value.
-3. Confirm the queue, group, node/process count, memory, walltime, paths, and
-   expected output location.
-4. Confirm required modules are loaded in the job body, not only in the login
-   shell.
-5. Check target architecture, PBS nodefile, and the absolute virtualenv Python
-   path. Preserve interpreter symlinks; propagate it to nested launchers.
-6. Confirm the exact script and resource request immediately before `qsub`.
+Before `qsub <script>`, run `bash -n <script>`, inspect the final placeholders,
+queue, group, resources, paths, module setup and outputs. PBS directives require
+literal values; shell variables are not expanded. Keep dependency-complete
+preflight in compute; a submission wrapper should only inspect parameters/files
+and perform the authorized submission.
 
-Submit and record the returned job ID:
-
-```bash
-qsub <script>
-```
-
-Use command-line resource overrides only when their precedence and effect are
-intentional. Do not request a shorter walltime than startup, execution, output
-preservation, and orderly teardown can fit.
-
-Keep dependency-complete preflight in compute; submit wrappers should only do
-control-plane-compatible preparation and the authorized qsub. Retain qsub's
-exit status, stdout and stderr. Monitor the returned job ID with the JSON helper.
-After an uncertain submission response, reconcile current/history JSON and job
-logs before retrying, to avoid duplicate jobs. A rejected resource request
-requires a corrected request, not an unchanged retry. Do not assume users may
-move a queued job with `qalter -q`; inspect the rejection and change scheduling
-only within the authorized scope.
-
-Use `type -a qsub`, `qsub --version`, and the local manual
-`/usr/local/share/man/man1/qsub.1` to identify the command and dialect.
-`qsub --help` was rejected on the inspected login host
-(2026-09-05); its generic usage output is not a list of site-approved resources.
-
-For MPI-based jobs, read [mpi.md](mpi.md) and the relevant framework reference
-before constructing the launcher.
+Retain qsub's exit status, stdout/stderr and returned job ID. Monitor that ID with
+the JSON helper. If submission has an uncertain result, reconcile current/history
+jobs and logs before retrying to avoid duplicates. Correct a rejected request
+before retrying; changing or cancelling jobs remains subject to the authorized
+scope. Interpret completion with [job results](qstat.md#interpret-results).

@@ -1,63 +1,28 @@
-# Hugging Face Accelerate PBS Pattern
+# Accelerate Under PBS
 
-Use this for code that creates `Accelerator()` directly and lets Accelerate
-read rank information from environment variables. The Miyabi pattern is
-`mpirun -np WORLD_SIZE`; each MPI process exports `RANK`, `WORLD_SIZE`,
-`LOCAL_RANK`, and `LOCAL_WORLD_SIZE` from Open MPI variables before running the
-Python module.
+For direct `Accelerator()` use, adapt
+[mpi-workers.pbs](../assets/pbs/mpi-workers.pbs) using the
+[template setup](templates.md) and [Open MPI rules](mpi.md). Each MPI process
+runs one Python worker and exports:
 
-## Contents
+| Worker variable | Open MPI source |
+| --- | --- |
+| `RANK` | `OMPI_COMM_WORLD_RANK` |
+| `WORLD_SIZE` | `OMPI_COMM_WORLD_SIZE` |
+| `LOCAL_RANK` | `OMPI_COMM_WORLD_LOCAL_RANK` |
+| `LOCAL_WORLD_SIZE` | `OMPI_COMM_WORLD_LOCAL_SIZE` |
 
-- [PBS Template](#pbs-template)
-- [Python Entrypoint Expectations](#python-entrypoint-expectations)
-- [Notes](#notes)
+The template also supplies a shared `MASTER_ADDR`/`MASTER_PORT`. Accelerate
+uses this distributed environment; an `accelerate launch` configuration file
+is not consumed by this direct Python invocation.
 
-## PBS Template
+For `accelerate launch --multi_gpu`, run one launcher per machine and let it
+spawn local workers, adapting the supervisor topology in
+[torchrun-pbs.md](torchrun-pbs.md). Other backends, such as DeepSpeed, need their
+own launch contract. Keep `--num_processes` (total workers),
+`--num_machines`, `--machine_rank`, `--main_process_ip`, `--main_process_port`
+and the config's distributed mode consistent with the allocation. Do not run
+a full spawning launcher inside every MPI worker.
 
-Select the project/user PBS group as described in [qsub.md](qsub.md); fill it
-as a literal because PBS directives do not expand shell variables.
-
-Copy [../assets/pbs/mpi-workers.pbs](../assets/pbs/mpi-workers.pbs)
-and follow [templates.md](templates.md) to set the target, paths, modules and
-resource shape. That file is the maintained script; this reference explains
-the launcher contract.
-
-
-## Python Entrypoint Expectations
-
-```python
-from accelerate import Accelerator
-
-def train(*args, **kwargs):
-    accelerator = Accelerator()
-    world_size = accelerator.num_processes
-
-    if accelerator.is_main_process:
-        print(f"world_size={world_size}")
-
-    # Build model, optimizer, dataloaders, then use accelerator.prepare(...)
-    # or a Trainer/SFTTrainer stack that integrates with Accelerate.
-
-    accelerator.wait_for_everyone()
-    accelerator.end_training()
-```
-
-## Notes
-
-- Discover exact modules through the JSON queries in [module.md](module.md),
-  consulting catalog/help text when needed. Replace or remove every module
-  placeholder before submission. Keep `REQUIRED_MODULES=()` only when the job
-  intentionally uses the compute-node defaults, and still log `module list`.
-- This template is for direct `Accelerator()` use under `mpirun`; rank discovery
-  comes from the exported environment, not an Accelerate launcher config.
-- If the project standardizes on `accelerate launch`, use official launcher
-  flags (`--config_file`, `--num_processes`, `--num_machines`,
-  `--machine_rank`, `--main_process_ip`, `--main_process_port`) and still run
-  only from compute nodes or PBS jobs.
-- Keep any Accelerate launcher config consistent with the allocation:
-  `distributed_type`, `mixed_precision`, `num_machines`, and `num_processes`
-  should match or be intentionally overridden.
-- Derive a job-specific default port from `$PBS_JOBID`, but allow
-  `MASTER_PORT` to override it when project policy reserves a port range.
-- Re-check launcher flags against the current
-  [Accelerate CLI documentation](https://huggingface.co/docs/accelerate/package_reference/cli).
+Check the pinned version's [Accelerate CLI](https://huggingface.co/docs/accelerate/package_reference/cli)
+for supported flags, including configuration and mixed-precision settings.

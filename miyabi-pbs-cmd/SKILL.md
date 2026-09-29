@@ -1,154 +1,87 @@
 ---
 name: miyabi-development
 description: >-
-  Operate Miyabi safely from local, login, and PBS compute shells. Use for
-  hostname, architecture and allocation classification, Environment Modules,
-  qsub/qstat, storage, job diagnostics, Python environments, and Miyabi-specific GPU or
-  distributed runtime setup. Prefer bundled JSON helpers for context and job
-  queries; keep login nodes control-plane only and load references on demand.
+  Operate Miyabi login and PBS compute shells: inspect host/allocation context,
+  query and submit jobs, select modules and Python environments, and configure
+  Miyabi storage or GPU/distributed workloads.
 ---
 
-# Miyabi Operations For Agents
+# Miyabi Operations
 
-Use the bundled helpers to inspect Miyabi and the PBS assets to prepare jobs.
-This skill defines execution boundaries and site-specific operations; project
-development policy belongs to the project instructions.
+Use project instructions, existing PBS scripts, environment pins and current
+site output to choose paths, accounting group, resources and software versions.
+This skill supplies Miyabi execution guidance; project acceptance criteria stay
+with the project and user.
 
-## Start With Structured Queries
+## Establish The Execution Context
 
-Set `SKILL_ROOT` to this installed skill's absolute directory so these commands
-work from the project checkout. Both login families provide system Python 3.9;
-the helpers use only its standard library and need no project environment.
+Set `SKILL_ROOT` to this installed skill's absolute directory. The helpers need
+only Python 3.9+ and its standard library; use host Python before invoking a
+project environment.
 
 ```bash
 SKILL_ROOT="/absolute/path/to/miyabi-development"
-# Select the target from the workload: Miyabi-G or Miyabi-C.
+# Select the target from the workload, independently of the current login host.
 /usr/bin/python3 -I "$SKILL_ROOT/scripts/context.py" --target-system Miyabi-G
-# Current jobs; use -H for history and --fields or --summary to limit output.
-/usr/bin/python3 -I "$SKILL_ROOT/scripts/qstat_json.py"
 ```
 
-Use [context.py](scripts/context.py) before selecting a project interpreter or
-entering/reusing an allocation. Keep its `node_role`, `architecture` and
-`target_system` separate: G is `aarch64`, C is `x86_64`; a G project edited on
-C login still targets G. Before application/runtime execution, add
-`--require-compute` and require success. Unknown hosts, inherited PBS variables
-alone, or matching architecture on a login host do not grant compute execution.
-Guard semantics and compatible login-side `.venv` use:
-[references/python-env.md](references/python-env.md).
+Keep host role, observed architecture and project target separate: Miyabi-G is
+`aarch64`, Miyabi-C is `x86_64`. Editing a G project on C login does not change
+its target. Before application execution, run the helper with the chosen target
+and `--require-compute`; require exit 0. Unknown hosts, login hosts and inherited
+PBS variables alone do not pass this guard. Its evidence is local, so also check
+the job's live state when entering or reusing an allocation.
 
-Use [qstat_json.py](scripts/qstat_json.py) as the default for current jobs,
-history, status filtering and counts. Read JSON and check `ok` and exit status;
-do not recreate its parsing with shell pipelines. Direct `qstat` is a fallback
-for uncovered fields/queries or helper diagnostics, as described in
-[references/qstat.md](references/qstat.md). For module discovery and loaded
-state, use native JSON as described in [references/module.md](references/module.md);
-module loading still runs in the current shell.
+## Execution Boundaries
 
-## Inspect Local And Project Rules
+Use these conservative defaults for agent-run work on shared login nodes;
+the [site guidance](https://www.cc.u-tokyo.ac.jp/en/guide/notice/) describes the
+underlying load restrictions.
 
-Prefer current evidence over generic examples:
+| Work | Where to run |
+| --- | --- |
+| File/repository edits, scheduler/module inspection, authorized submission | Login/control plane |
+| Small host-native utilities, `bash -n`, existing compatible static tools such as Ruff; this skill's stdlib offline tests | Login, when project rules permit |
+| Project test suites, runtime validators, application/ML imports, environment synchronization, dependency builds, preprocessing, training, inference, MPI/CUDA operations | Matching PBS compute allocation |
 
-- `AGENTS.md`, `README*`, `for_codex/`, environment files, and user notes;
-- existing PBS scripts, recent job logs, module setup, and site documentation;
-- `pyproject.toml`, `uv.lock`, `.python-version`, `.venv/`, and launcher
-  configuration;
-- live structured context, job and module results, with native diagnostics
-  when needed.
+A compatible `.venv` does not change a command's workload class. Route an
+incompatible binary to its target architecture instead of recreating the shared
+environment on login. Honor stricter project execution rules.
 
-Do not hardcode project paths, groups, queues, modules, models, datasets, cache
-directories, or resource limits unless the project, user, or current Miyabi
-state provides them.
+Use a persistent interactive PTY for iterative compute checks and batch jobs
+for unattended or sustained work. In each allocation, establish modules in that
+shell, select the project cwd/interpreter, and check remaining walltime before
+starting work. Preserve required scratch outputs and stop owned background
+processes before exiting. Recheck context after the session ends.
 
-## Load Only The Relevant Reference
+Submission and job control change scheduler state. Verify the exact target and
+resources against the user's authorized scope immediately before acting; an
+existing authorization remains valid within that scope.
 
-- Environment Modules discovery, loading, conflicts, or pager behavior: read
-  [references/module.md](references/module.md).
-- Queue/resource discovery, job status, history, or diagnostics: read
-  [references/qstat.md](references/qstat.md) for the JSON contract and limited
-  native fallbacks.
-- Interactive allocation, batch script construction, or job submission: read
-  [references/qsub.md](references/qsub.md).
-- Storage, quotas, job-local scratch, network, or containers: read
-  [references/filesystem-network.md](references/filesystem-network.md).
-- Python architecture mismatch, interpreter selection, environment creation,
-  or dependency installation: read
-  [references/python-env.md](references/python-env.md).
-- Code → validation → experiments, allocation reuse, or validation failures:
-  read [references/validation.md](references/validation.md).
-- Open MPI environment propagation and process placement: read
-  [references/mpi.md](references/mpi.md).
-- PyTorch distributed or `torchrun`: read
-  [references/torchrun-pbs.md](references/torchrun-pbs.md).
-- Direct `Accelerator()` use or `accelerate launch`: read
-  [references/accelerate-pbs.md](references/accelerate-pbs.md).
-- vLLM, LoRA inference, CUDA device visibility, Triton, or FlashInfer: read
-  [references/vllm-miyabi.md](references/vllm-miyabi.md).
+## Query And Load Details On Demand
 
-Load the smallest relevant combination. Do not copy framework-specific
-procedures back into this entrypoint.
+Use [qstat_json.py](scripts/qstat_json.py) for current jobs and history:
 
-## Enforce Miyabi Safety Boundaries
+```bash
+/usr/bin/python3 -I "$SKILL_ROOT/scripts/qstat_json.py"
+# Add -H for history; --fields or --summary limits the returned output.
+```
 
-On login/control-plane nodes, limit work to:
+Check JSON `ok` and exit status. Use the documented native fallbacks for fields
+or queries the helper does not cover, or to diagnose a failure.
 
-- reading and editing files;
-- repository and configuration inspection;
-- module and scheduler inspection through the interfaces above, authorized
-  `qsub`, and job-log inspection;
-- small Python 3.9 standard-library tasks such as JSON conversion, bounded
-  log/file processing, and this skill's helpers and offline tests;
-- shell syntax checks and lightweight static checks using an already available
-  compatible tool (including project `.venv` Ruff), with the required version
-  and configuration, when project rules allow it.
+| Need | Reference |
+| --- | --- |
+| Job JSON contract, resources, limits, history and exit status | [qstat.md](references/qstat.md) |
+| Interactive sessions and batch submission | [qsub.md](references/qsub.md) |
+| PBS assets, placeholders and validation limits | [templates.md](references/templates.md) |
+| Module discovery, conflicts and shell initialization | [module.md](references/module.md) |
+| Python architecture, interpreter identity and environment setup | [python-env.md](references/python-env.md) |
+| Storage, scratch, quotas, network and containers | [filesystem-network.md](references/filesystem-network.md) |
+| Open MPI placement and rank environments | [mpi.md](references/mpi.md) |
+| `torchrun` or Accelerate launch contracts | [torchrun-pbs.md](references/torchrun-pbs.md), [accelerate-pbs.md](references/accelerate-pbs.md) |
+| vLLM device visibility, compilation and LoRA evaluation | [vllm-miyabi.md](references/vllm-miyabi.md) |
 
-Run application code, tests, heavy imports, dependency builds, preprocessing, model
-loading, training, inference, distributed launchers, CUDA/NCCL operations, and
-GPU profiling only in a confirmed PBS compute allocation.
-Route pytest, runtime validators, and commands that synchronize/build the
-project environment to the target allocation. A compatible `.venv` does not
-change a command's workload class. An architecture mismatch calls for changing execution
-location, not replacing the shared environment on the login host. Honor
-stricter project rules that require all project checks on compute nodes.
-
-Treat module state as shell-local. Load required modules again inside every
-interactive or batch job shell and record the loaded modules there.
-
-Treat job submission, cancellation, suspension, and release as external state
-changes. Perform them only within the user's authorized scope, and confirm the
-target job and requested resources immediately before the command.
-
-Preserve existing user files and shared work. Do not overwrite tracked source,
-delete jobs or artifacts, alter shell startup files, or change shared
-infrastructure without explicit authorization.
-
-## Choose Interactive Or Batch Execution
-
-Use an interactive allocation when the agent needs a shell for short,
-iterative commands or direct inspection of compute-node state. Keep the same
-PTY session and allocation until that work is finished; do not request a new
-allocation for each command.
-
-Use a batch job for unattended or durable work, sustained resource use, or
-multi-node execution that should continue without an attached terminal.
-Request only the nodes, processes, memory, and walltime justified by the
-workload and current queue limits.
-
-After entering any allocation:
-
-1. Require a successful `context.py --target-system <target> --require-compute`
-   guard and set the intended project cwd.
-2. Inspect and load modules in that shell.
-3. Query the allocation ID with `qstat_json.py`. For resource details and
-   walltime budget, use the detail fallback in [references/qstat.md](references/qstat.md).
-4. Run only the user-authorized workload.
-5. Copy required outputs from job-local scratch to durable storage.
-6. Stop background processes and exit cleanly when finished.
-
-## Report Operations Precisely
-
-Retain hostname/architecture, target system, PBS job ID, resource request,
-interpreter path, modules, commands and exit results in the relevant logs or
-project records. Report the result and material limitations concisely. Treat
-PBS completion, application exit, and validated outputs as separate evidence;
-do not claim unrun or interrupted checks passed.
+Retain the job ID, execution context, modules, interpreter, command and exit
+result in task logs. PBS completion, application exit and validated outputs are
+separate evidence; report only what was checked.

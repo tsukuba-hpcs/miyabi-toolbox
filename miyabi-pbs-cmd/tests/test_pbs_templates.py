@@ -79,9 +79,8 @@ class TemplateTests(unittest.TestCase):
                 "Miyabi-G_or_Miyabi-C": "Miyabi-G", "absolute_project_or_snapshot_root": str(project),
                 "local_workers_per_node": "1", "target_module/version": "example/1",
                 "compiler-or-runtime-module/version": "example/1", "mpi-module/version": "example/1",
-                "entrypoint.py": "entrypoint.py", "argument": "argument with spaces",
-                "config.yaml": "config with spaces.yaml", "experiment_name": "example experiment",
-                "config_or_args": "config with spaces.yaml",
+                "entrypoint.py": "worker entrypoint.py", "argument": "argument with spaces",
+                "python_module": "example.worker",
             }
             content = re.sub(r"<([A-Za-z_][A-Za-z0-9_./:-]*)>", lambda match: values[match[1]], template.read_text())
             script = workspace / "job.pbs"
@@ -89,7 +88,10 @@ class TemplateTests(unittest.TestCase):
             nodefile = workspace / "nodes"
             nodefile.write_text("mg0021\nmg0022\n" if template.name != "single-node.pbs" else "mg0021\n")
             observations = workspace / "observations.jsonl"
-            env = dict(os.environ, PATH=str(bindir) + ":/usr/bin:/bin", PBS_JOBID="1234.opbs",
+            # Ambient project overrides must not hide the template's filled entrypoint.
+            env = {key: value for key, value in os.environ.items()
+                   if key not in {"ENTRYPOINT", "PYTHON_MODULE"}}
+            env.update(PATH=str(bindir) + ":/usr/bin:/bin", PBS_JOBID="1234.opbs",
                        PBS_NODEFILE=str(nodefile), PYTHON_BIN=str(interpreter),
                        RUNTIME_CC="selected-gcc", RUNTIME_CXX="selected-g++",
                        TEST_OBSERVATIONS=str(observations), TEST_ACTOR_EXIT=str(actor_exit),
@@ -123,7 +125,13 @@ class TemplateTests(unittest.TestCase):
                     self.assertEqual(record["cxx"], "selected-g++")
                 if template.name == "torchrun.pbs":
                     self.assertEqual(records[0]["args"][:2], ["-m", "torch.distributed.run"])
-                    self.assertIn("config with spaces.yaml", records[0]["args"])
+                    self.assertEqual(records[0]["args"][-2:], [
+                        str(Path(records[0]["cwd"]) / "worker entrypoint.py"), "argument with spaces",
+                    ])
+                elif template.name == "mpi-workers.pbs":
+                    self.assertEqual(records[0]["args"], ["-m", "example.worker", "argument with spaces"])
+                else:
+                    self.assertEqual(records[-1]["args"], ["worker entrypoint.py", "argument with spaces"])
 
     def test_worker_failure_survives_tee(self):
         """A successful log sink must not turn an application failure into success."""
