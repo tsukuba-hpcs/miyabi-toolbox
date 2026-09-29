@@ -1,0 +1,6 @@
+# This directory is the Codex skills directory. Track only the miyabi skills;
+# the other skills here are managed elsewhere. Each skill keeps its own
+# .gitignore for caches, secrets and runtime state.
+/*
+!/.gitignore
+!/miyabi-*/
