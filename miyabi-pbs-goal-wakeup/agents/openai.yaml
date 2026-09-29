@@ -1,4 +1,4 @@
 interface:
   display_name: "Miyabi PBS Goal Wake-up"
-  short_description: "Resume Codex Goals after Miyabi PBS jobs finish"
+  short_description: "Resume Codex Goals or Claude Code sessions after Miyabi PBS jobs finish"
   default_prompt: "Use $miyabi-pbs-goal-wakeup to resume after this long Miyabi PBS job, polling every 5 minutes."

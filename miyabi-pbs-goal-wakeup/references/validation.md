@@ -11,7 +11,10 @@ Set `SKILL_ROOT` to this installed skill directory. From any cwd, run:
 
 Tests use fake PBS responses, a fake Codex command and socket pairs; they neither
 submit PBS jobs nor wake a live agent. The detached timer test uses the packaged
-script, so moving the skill must not break its subprocess path.
+script, so moving the skill must not break its subprocess path. The Claude tests
+run the attached watcher as a subprocess (timer, failing PBS job with a fake
+`qstat`, cancel while attached) and cover agent selection, refusal of options for
+the other agent, session-bound `ack` and unchanged handling of legacy Codex events.
 
 For a live test, follow [SKILL.md](../SKILL.md) with an explicitly authorized job or timer and
 Goal pause. A successful API return alone is not enough: the original Goal must
@@ -36,6 +39,23 @@ The implementation was tested on Miyabi with Codex 0.158.0 on 2026-09-29:
 These historical runs preceded the skill split/rename and the change to a
 300-second default. They do not validate a fresh installation or its live Goal
 lifecycle. Offline tests alone do not establish successful live restoration.
+
+The Claude Code watcher was tested on Miyabi (`miyabi-g1`) with Claude Code
+2.1.284 on 2026-09-29, from the installed `~/.claude/skills` path, each launched
+as a background Bash task in an active session:
+
+- A 20-second timer was delivered 0.003 seconds after its due time; the task
+  completion notice arrived with the full wake-up text and `ack` from the same
+  session set `acknowledged`.
+- A real `qstat` query of an already finished job (3447971, Exit_status=0)
+  produced the wake-up with the observation and `qstat -H -f` detail on the
+  first poll.
+
+Not observed: a wake-up of a session whose turn had already ended (the notice
+reached a turn still in progress), multi-hour background retention, an
+in-flight job moving through QUEUED/RUNNING, and session loss with recovery
+through `run`. These rest on Claude Code's documented background-task behavior
+and the offline tests.
 
 ## Bundled PBS helper
 

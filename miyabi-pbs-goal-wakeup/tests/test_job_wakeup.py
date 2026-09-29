@@ -180,6 +180,164 @@ class WakeTests(unittest.TestCase):
         self.assertIn("literal $(false)", record["argv"][4])
 
 
+SESSION = "00000000-0000-0000-0000-0000000000c1"
+MISSING_CODEX = "no-such-codex-binary"
+
+
+class ClaudeTests(unittest.TestCase):
+    """Claude Code wake-up: the attached watcher prints the wake-up and exits."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.directory = Path(self.temp.name)
+        self.script = str(Path(wake.__file__))
+        self.env = {key: value for key, value in os.environ.items()
+                    if key not in {"CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"}}
+
+    def arm(self, *args, env=None, **kwargs):
+        return subprocess.run([sys.executable, "-I", self.script, *args, "--state-root",
+                               str(self.directory / "events")], capture_output=True,
+                              text=True, env=env or self.env, timeout=30, **kwargs)
+
+    def fake_pbs(self, exit_status):
+        """Fake qstat helper reporting an already finished job, plus a fake `qstat -H -f`."""
+        helper = self.directory / "helper.py"
+        helper.write_text('import json\nprint(json.dumps({"ok": True, "jobs": ['
+                          '{"job_id": "1234567", "status": "FINISH"}]}))\n')
+        binary = self.directory / "bin"
+        binary.mkdir()
+        qstat = binary / "qstat"
+        qstat.write_text(f"#!/bin/sh\necho '    Exit_status = {exit_status}'\n")
+        qstat.chmod(0o700)
+        return helper, dict(self.env, PATH=f"{binary}:{self.env['PATH']}")
+
+    def events(self):
+        (event,) = (self.directory / "events").iterdir()
+        return event
+
+    def test_timer_prints_wake_message_on_stdout_and_stays_unsent_until_due(self):
+        result = self.arm("timer", "--seconds", "0.2", "--agent", "claude", "--session", SESSION,
+                          "--message", "literal $(false)")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        registration, wakeup = result.stdout.split("\n", 1)
+        state = wake.read_state(self.events())
+        self.assertEqual(json.loads(registration)["event"], str(self.events()))
+        self.assertEqual(json.loads(registration)["worker_pid"], state["worker_pid"])
+        self.assertIn(f"[job-wakeup event {state['event_id']}]", wakeup)
+        self.assertIn("literal $(false)", wakeup)
+        self.assertIn(json.dumps([sys.executable, self.script, "ack", str(self.events())]), wakeup)
+        self.assertEqual((state["agent"], state["session_id"], state["status"]),
+                         ("claude", SESSION, "delivered"))
+        self.assertGreaterEqual(state["send_started_at"], state["due_at"])
+        self.assertNotIn("thread_id", state)
+
+    def test_pbs_failure_reaches_the_wake_message_with_exit_status(self):
+        helper, env = self.fake_pbs(exit_status=3)
+        result = self.arm("pbs", "--job", "1234567", "--helper", str(helper), "--agent", "claude",
+                          "--session", SESSION, "--message", "Inspect results", env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        state = wake.read_state(self.events())
+        self.assertEqual(state["status"], "delivered")
+        self.assertEqual(state["observation"]["exit_status"], 3)
+        self.assertIn('"exit_status": 3', result.stdout)
+        self.assertIn('"status": "FINISH"', result.stdout)
+
+    def test_session_defaults_to_environment_and_agent_is_detected(self):
+        env = dict(self.env, CLAUDE_CODE_SESSION_ID=SESSION)
+        result = self.arm("timer", "--seconds", "0.1", "--message", "go", env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(wake.read_state(self.events())["session_id"], SESSION)
+
+    def test_agent_selection_and_option_validation(self):
+        env = dict(self.env, CLAUDE_CODE_SESSION_ID=SESSION)
+        cases = (
+            # Codex-only options are refused for Claude instead of being silently ignored.
+            (["--agent", "claude", "--remote", "unix:///x.sock"], self.env, "apply only to --agent codex"),
+            # Legacy invocations always carried --remote, so they keep resolving to Codex.
+            (["--remote", "unix:///x.sock", "--thread", SESSION, "--codex", MISSING_CODEX], env,
+             "codex executable not found"),
+            (["--session", SESSION, "--remote", "unix:///x.sock"], self.env,
+             "--session applies only to --agent claude"),
+            (["--agent", "codex"], self.env, "--remote is required for --agent codex"),
+            (["--agent", "codex", "--remote", "unix:///x.sock", "--codex", MISSING_CODEX],
+             dict(env, CODEX_THREAD_ID=SESSION), "codex executable not found"),
+            (["--agent", "claude"], self.env, "--session is required outside a Claude Code session"),
+            (["--agent", "claude", "--session", "not-a-uuid"], self.env, "exact session UUID"),
+        )
+        for extra, env_used, message in cases:
+            with self.subTest(extra=extra):
+                result = self.arm("timer", "--seconds", "1", "--message", "go", *extra, env=env_used)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn(message, result.stderr)
+                self.assertFalse((self.directory / "events").exists())
+
+    def test_registration_refuses_unseen_job_without_creating_event(self):
+        helper = self.directory / "helper.py"
+        helper.write_text('print(\'{"ok": true, "jobs": []}\')\n')
+        result = self.arm("pbs", "--job", "1234567", "--helper", str(helper), "--agent", "claude",
+                          "--session", SESSION, "--message", "go")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("absent from active jobs", result.stderr)
+        self.assertFalse((self.directory / "events").exists())
+
+    def test_cancel_stops_the_attached_watcher_without_a_wake_message(self):
+        process = subprocess.Popen(
+            [sys.executable, "-I", self.script, "timer", "--seconds", "60", "--agent", "claude",
+             "--session", SESSION, "--message", "go", "--state-root", str(self.directory / "events")],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=self.env)
+        self.addCleanup(process.kill)
+        registration = json.loads(process.stdout.readline())
+        cancel = subprocess.run([sys.executable, "-I", self.script, "cancel", registration["event"]],
+                                capture_output=True, text=True)
+        self.assertEqual(cancel.returncode, 0, cancel.stderr)
+        stdout, stderr = process.communicate(timeout=10)
+        self.assertEqual(process.returncode, 0, stderr)
+        self.assertIn("cancelled", stdout)
+        self.assertNotIn("[job-wakeup event", stdout)
+
+    def test_delivery_prints_only_and_is_not_repeated_after_restart(self):
+        wake.write_state(self.directory, dict(event_id="test", agent="claude", session_id=SESSION,
+                                             status="ready", kind="timer", cwd=str(self.directory),
+                                             message="Inspect results", observation={"status": "FINISH"}))
+        with patch.object(wake.subprocess, "run") as run, patch("builtins.print") as printed:
+            wake.deliver(self.directory)
+            wake.worker(self.directory)
+        run.assert_not_called()
+        printed.assert_called_once()
+        self.assertEqual(wake.read_state(self.directory)["status"], "delivered")
+
+    def test_unwritable_stdout_is_uncertain_not_retried(self):
+        wake.write_state(self.directory, dict(event_id="test", agent="claude", session_id=SESSION,
+                                             status="ready", kind="timer", cwd=str(self.directory),
+                                             message="Inspect results", observation={"status": "FINISH"}))
+        with patch("builtins.print", side_effect=BrokenPipeError("closed")) as printed:
+            wake.deliver(self.directory)
+            wake.worker(self.directory)
+        printed.assert_called_once()
+        self.assertEqual(wake.read_state(self.directory)["status"], "uncertain")
+
+    def ack(self, state, **environ):
+        wake.write_state(self.directory, dict(state, event_id="test", status="delivered"))
+        env = {key: value for key, value in os.environ.items()
+               if key not in {"CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"}}
+        with patch.dict(os.environ, dict(env, **environ), clear=True), patch("builtins.print"):
+            wake.main(["ack", str(self.directory)])
+        return wake.read_state(self.directory)
+
+    def test_ack_requires_the_registered_agent_session(self):
+        claude = dict(agent="claude", session_id=SESSION)
+        self.assertEqual(self.ack(claude, CLAUDE_CODE_SESSION_ID=SESSION)["status"], "acknowledged")
+        for environ in ({}, {"CLAUDE_CODE_SESSION_ID": "other"}, {"CODEX_THREAD_ID": SESSION}):
+            with self.subTest(environ=environ), self.assertRaisesRegex(RuntimeError, "registered Claude Code session"):
+                self.ack(claude, **environ)
+        # Events created before Claude support carry no agent key and stay Codex events.
+        legacy = dict(thread_id="thread")
+        self.assertEqual(self.ack(legacy, CODEX_THREAD_ID="thread")["status"], "acknowledged")
+        with self.assertRaisesRegex(RuntimeError, "registered Codex thread"):
+            self.ack(legacy, CLAUDE_CODE_SESSION_ID=SESSION)
+
+
 class GoalTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Durable, stdlib-only timer/PBS notifications for an existing Codex thread."""
+"""Durable, stdlib-only timer/PBS notifications for an existing Codex thread or Claude Code session."""
 
 import argparse
 from contextlib import contextmanager
@@ -361,6 +361,40 @@ def wake_message(state, directory):
     )
 
 
+def send_codex(state, directory):
+    command = [state["codex"], "queue", "--thread", state["thread_id"],
+               "--message", wake_message(state, directory), "--remote", state["remote"]]
+    try:
+        result = subprocess.run(command, cwd=state["cwd"], capture_output=True,
+                                text=True, timeout=60)
+        return {"queue_returncode": result.returncode,
+                "queue_stdout": result.stdout[-4000:], "queue_stderr": result.stderr[-4000:],
+                "send_finished_at": time.time(),
+                "delivery_status": "accepted" if result.returncode == 0 else "uncertain"}
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"delivery_status": "uncertain", "delivery_error": str(exc),
+                "send_finished_at": time.time()}
+
+
+def send_claude(state, directory):
+    """Print the wake-up. The watcher runs attached as a Claude Code background command,
+    and the harness resumes the idle session when that command exits."""
+    try:
+        print(wake_message(state, directory), flush=True)
+    except OSError as exc:
+        return {"delivery_status": "uncertain", "delivery_error": str(exc),
+                "send_finished_at": time.time()}
+    return {"delivery_status": "accepted", "send_finished_at": time.time()}
+
+
+SENDERS = {"codex": send_codex, "claude": send_claude}
+
+
+def event_agent(state):
+    # Events registered before Claude support have no agent key and belong to Codex.
+    return state.get("agent", "codex")
+
+
 def deliver(directory):
     def claim(state):
         if state["status"] != "ready":
@@ -368,22 +402,11 @@ def deliver(directory):
         state.update(status="sending", send_started_at=time.time())
 
     state = update(directory, claim)
-    command = [state["codex"], "queue", "--thread", state["thread_id"],
-               "--message", wake_message(state, directory), "--remote", state["remote"]]
-    try:
-        result = subprocess.run(command, cwd=state["cwd"], capture_output=True,
-                                text=True, timeout=60)
-        outcome = {"queue_returncode": result.returncode,
-                   "queue_stdout": result.stdout[-4000:], "queue_stderr": result.stderr[-4000:],
-                   "send_finished_at": time.time(),
-                   "delivery_status": "accepted" if result.returncode == 0 else "uncertain"}
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        outcome = {"delivery_status": "uncertain", "delivery_error": str(exc),
-                   "send_finished_at": time.time()}
+    outcome = SENDERS[event_agent(state)](state, directory)
 
     def finish(current):
         current.update(outcome)
-        # The resumed agent can acknowledge before codex queue exits.
+        # The resumed agent can acknowledge before the send call returns.
         if current["status"] != "acknowledged":
             current["status"] = "delivered" if outcome["delivery_status"] == "accepted" else "uncertain"
     update(directory, finish)
@@ -466,13 +489,17 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command", required=True)
     for kind in ("timer", "pbs"):
         arm = sub.add_parser(kind)
-        arm.add_argument("--thread", default=os.environ.get("CODEX_THREAD_ID"))
+        arm.add_argument("--agent", choices=("codex", "claude"), help=(
+            "agent to wake; default: claude inside Claude Code unless a Codex option "
+            "or CODEX_THREAD_ID is present, otherwise codex"))
         arm.add_argument("--message", required=True)
         arm.add_argument("--state-root", type=Path, default=Path(".job-wakeup"))
-        arm.add_argument("--remote", required=True, help="existing Codex app-server endpoint")
-        arm.add_argument("--codex", default="codex")
+        arm.add_argument("--session", help="Claude only: exact session UUID; defaults to CLAUDE_CODE_SESSION_ID")
+        arm.add_argument("--thread", help="Codex only: exact thread UUID; defaults to CODEX_THREAD_ID")
+        arm.add_argument("--remote", help="Codex only, required there: existing Codex app-server endpoint")
+        arm.add_argument("--codex", help="Codex only: Codex executable (default: codex)")
         arm.add_argument("--resume-goal", action="store_true", help=(
-            "arm restoration of this Goal after the user-authorized pause; "
+            "Codex only: arm restoration of this Goal after the user-authorized pause; "
             "caller must pause it and end the turn within five minutes"))
         if kind == "timer":
             arm.add_argument("--seconds", type=positive, required=True)
@@ -484,27 +511,53 @@ def main(argv=None):
         sub.add_parser(name).add_argument("event", type=Path)
     args = parser.parse_args(argv)
     if args.command in ("timer", "pbs"):
-        if not args.thread:
-            parser.error("--thread is required outside a Codex thread")
-        try:
-            uuid.UUID(args.thread)
-        except ValueError:
-            parser.error("--thread must be an exact thread UUID")
-        executable = shutil.which(args.codex)
-        if not executable:
-            parser.error("codex executable not found")
+        codex_options = [flag for flag, value in (
+            ("--thread", args.thread), ("--remote", args.remote),
+            ("--codex", args.codex), ("--resume-goal", args.resume_goal)) if value]
+        in_claude = os.environ.get("CLAUDE_CODE_SESSION_ID") and not os.environ.get("CODEX_THREAD_ID")
+        agent = args.agent or ("claude" if in_claude and not codex_options else "codex")
+        if agent == "claude":
+            if codex_options:
+                parser.error(", ".join(codex_options) + " apply only to --agent codex")
+            target = args.session or os.environ.get("CLAUDE_CODE_SESSION_ID")
+            if not target:
+                parser.error("--session is required outside a Claude Code session")
+            try:
+                uuid.UUID(target)
+            except ValueError:
+                parser.error("--session must be an exact session UUID")
+            executable = None
+        else:
+            if args.session:
+                parser.error("--session applies only to --agent claude")
+            if not args.remote:
+                parser.error("--remote is required for --agent codex")
+            target = args.thread or os.environ.get("CODEX_THREAD_ID")
+            if not target:
+                parser.error("--thread is required outside a Codex thread")
+            try:
+                uuid.UUID(target)
+            except ValueError:
+                parser.error("--thread must be an exact thread UUID")
+            executable = shutil.which(args.codex or "codex")
+            if not executable:
+                parser.error("codex executable not found")
         if args.command == "pbs":
             if not JOB_ID.fullmatch(args.job) or not args.helper.is_file():
                 parser.error("invalid job ID or missing qstat helper")
-            # A mistyped or expired ID would otherwise leave a paused Goal waiting indefinitely.
+            # A mistyped or expired ID would otherwise leave the agent waiting indefinitely.
             if pbs_observation({"job_id": args.job, "helper": str(args.helper.resolve())})[1]["status"] == "UNKNOWN":
                 parser.error("job is absent from active jobs and 31-day history")
         event_id = str(uuid.uuid4())
         directory = args.state_root.resolve() / event_id
         now = time.time()
-        state = dict(schema_version=1, event_id=event_id, kind=args.command, status="waiting",
-                     created_at=now, thread_id=args.thread, cwd=os.getcwd(), message=args.message,
-                     remote=args.remote, codex=executable, poll_seconds=getattr(args, "poll_seconds", 1))
+        state = dict(schema_version=1, event_id=event_id, kind=args.command, agent=agent,
+                     status="waiting", created_at=now, cwd=os.getcwd(), message=args.message,
+                     poll_seconds=getattr(args, "poll_seconds", 1))
+        if agent == "claude":
+            state.update(session_id=target)
+        else:
+            state.update(thread_id=target, remote=args.remote, codex=executable)
         if args.resume_goal:
             with Rpc(executable, args.remote) as rpc:
                 goal, thread_status = goal_view(rpc, args.thread)
@@ -518,6 +571,18 @@ def main(argv=None):
         # Create the event only after every registration check has passed.
         directory.mkdir(parents=True, mode=0o700)
         write_state(directory, state)
+        if agent == "claude":
+            # Stay attached: the caller runs this as a Claude Code background command, and
+            # its exit (carrying the wake-up on stdout) is what resumes the idle session.
+            update(directory, lambda s: s.update(worker_pid=os.getpid()))
+            print(json.dumps({"event": str(directory), "worker_pid": os.getpid(),
+                              "due_at": state.get("due_at")}), flush=True)
+            worker(directory)
+            final = read_state(directory)
+            if final["status"] == "cancelled":
+                print(f"job-wakeup: event {event_id} cancelled"
+                      + (f": {final['cancellation_reason']}" if final.get("cancellation_reason") else ""))
+            return
         with open(directory / "worker.log", "ab", buffering=0) as log:
             process = subprocess.Popen([sys.executable, "-I", str(Path(__file__).resolve()),
                                         "run", str(directory)], stdin=subprocess.DEVNULL,
@@ -531,7 +596,10 @@ def main(argv=None):
     else:
         def change(state):
             if args.command == "ack":
-                if os.environ.get("CODEX_THREAD_ID") != state["thread_id"]:
+                if event_agent(state) == "claude":
+                    if os.environ.get("CLAUDE_CODE_SESSION_ID") != state["session_id"]:
+                        raise RuntimeError("ack must run inside the registered Claude Code session")
+                elif os.environ.get("CODEX_THREAD_ID") != state["thread_id"]:
                     raise RuntimeError("ack must run inside the registered Codex thread")
                 if state["status"] not in {"sending", "delivered", "uncertain", "acknowledged"}:
                     raise RuntimeError("event has not been sent")
