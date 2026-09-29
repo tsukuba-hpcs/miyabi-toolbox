@@ -71,10 +71,10 @@ existing authorization remains valid within that scope.
 
 When estimated queue wait plus runtime exceeds 1 hour, invoke
 [miyabi-pbs-goal-wakeup](../miyabi-pbs-goal-wakeup/SKILL.md) if you are a
-Codex agent that meets its prerequisites. Plan at submission and register after
-obtaining the exact job ID. That skill defines estimation, authorization and
-Goal prerequisites, with a default 5-minute polling interval. Reassess when a
-queued job's expected wait grows.
+Codex or Claude Code agent that meets its prerequisites. Plan at submission and
+register after obtaining the exact job ID. That skill defines estimation,
+authorization and per-agent prerequisites, with a default 5-minute polling
+interval. Reassess when a queued job's expected wait grows.
 
 Otherwise, report the job ID, its current state and the `qstat_json.py` query
 for checking it later. Do not keep a turn open in a sleep or polling loop for a
