@@ -27,10 +27,10 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(jobs, [
             {"job_id": "1234001", "job_name": "STDIN", "status": "FINISH", "project": "example1",
              "queue": "interact-g_n1", "start_date": "09/04 04:26:27", "elapsed_seconds": 115,
-             "token": None, "nodes": 1, "mig": None},
+             "token": None, "token_estimate": None, "nodes": 1, "mig": None},
             {"job_id": "1234002", "job_name": "example_full_protocol", "status": "FINISH", "project": "example1",
              "queue": "debug-g", "start_date": "09/04 04:30:53", "elapsed_seconds": 644,
-             "token": 1.6, "nodes": 9, "mig": None},
+             "token": 1.6, "token_estimate": None, "nodes": 9, "mig": None},
         ])
         self.assertEqual(notices, [HISTORY.splitlines()[0]])
 
@@ -74,6 +74,23 @@ class ParserTests(unittest.TestCase):
         self.assertIsNone(jobs[0]["start_date"])
         self.assertIsNone(jobs[0]["nodes"])
         self.assertEqual(jobs[0]["mig"], 1)
+
+    def test_observed_queued_estimate_and_never_started_finish(self):
+        # Anonymized shapes observed on miyabi-g1 on 2026-09-29.
+        queued = (
+            "1234006           queued_job                                                       QUEUED    example1   short-g         (09/30 05:58:36) --:--:--      (2.0)    1   -"
+        )
+        deleted = (
+            "1234007           deleted_before_start                                             FINISH    example1   small-g         --:--:--         --:--:--          -    0   -"
+        )
+        jobs, _ = qstat.parse_qstat(HEADER + "\n" + queued + "\n" + deleted)
+        self.assertIsNone(jobs[0]["token"])
+        self.assertEqual(jobs[0]["token_estimate"], 2.0)
+        self.assertEqual(jobs[0]["start_date"], "(09/30 05:58:36)")
+        self.assertEqual(jobs[1]["status"], "FINISH")
+        self.assertIsNone(jobs[1]["start_date"])
+        self.assertIsNone(jobs[1]["elapsed_seconds"])
+        self.assertEqual(jobs[1]["nodes"], 0)
 
     def test_explicit_empty_results(self):
         for message in ("No unfinished job found. ", "No matching job found. "):

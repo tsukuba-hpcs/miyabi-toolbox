@@ -5,14 +5,17 @@
 Use [qstat's resource, limit and occupancy queries](qstat.md#native-fallback)
 before selecting a queue or resource shape. Check node/MIG counts, memory,
 maximum and remaining walltime, and project limits. Size walltime from comparable
-job usage and application logs, including startup and output preservation.
-Occupancy is useful context, not a prediction of start time.
+job usage and application logs, including startup and output preservation; an
+omitted walltime defaults to the queue maximum. Occupancy is useful context,
+not a prediction of start time.
 
-Miyabi uses parent routing queues: submit to `regular-g`/`regular-c` or
-`interact-g`/`interact-c`, not their indented destinations such as `small-g` or
-`interact-g_n1`. `debug-*` and `short-*` are options for eligible short batch
-work. Available queues and limits vary by project; use live output instead of a
-copied capacity table. Include supervisor jobs when checking concurrency limits.
+Submit only to top-level queue names in `qstat --rsc -x`, such as `regular-g`,
+`interact-g`, `short-g` or `debug-mig`. Indented `|--` entries such as `small-g`
+or `interact-g_n1` are routing destinations, not submission targets. `debug-*`
+and `short-*` are options for eligible short batch work. In `*-mig` queues,
+`select=N` counts MIG instances instead of G nodes. Available queues and limits
+vary by project; use live output instead of a copied capacity table. Include
+supervisor jobs when checking concurrency limits.
 
 Use the project/user's PBS group. If unspecified, compare `groups` with the
 eligible projects in `qstat --limit`/`--rsc -x`; infer it only when exactly one
@@ -34,13 +37,12 @@ qsub -I -q interact-g -W group_list="${GROUP_ID:?Set the PBS group}" \
   -l select=1 -l walltime=00:30:00
 ```
 
-For C, select `interact-c` and the C environment. The 2026-09-05 live view
-permits one node for up to two hours on either system; multi-node interactive
-limits are shorter (G: 2–8 nodes, C: 2 nodes, up to ten minutes). Recheck before
-requesting a different shape; use `select=N:mpiprocs=P` when placement needs it.
+For C, select `interact-c` and the C environment. Check current interactive
+node and walltime limits with `qstat --rsc -x`; use `select=N:mpiprocs=P` when
+placement needs it.
 
-After the compute prompt appears, follow [context and module setup](../SKILL.md).
-Set `SKILL_ROOT` in that shell and check the actual allocation:
+After the compute prompt appears, set `SKILL_ROOT` to the installed
+`miyabi-pbs-cmd` directory in that shell and check the allocation:
 
 ```bash
 /usr/bin/python3 -I "$SKILL_ROOT/scripts/context.py" \
@@ -49,7 +51,8 @@ Set `SKILL_ROOT` in that shell and check the actual allocation:
 ```
 
 Use the actual target in the guard and require success before project execution.
-Inspect remaining walltime with [job details](qstat.md#native-fallback).
+Then establish [modules](../../miyabi-pbs-shell-template/references/module.md)
+and inspect remaining walltime with [job details](qstat.md#native-fallback).
 To keep a failed check from closing the persistent shell, run checks in a child:
 
 ```bash
@@ -66,10 +69,11 @@ recheck host context; a lost allocation does not permit login-side runtime.
 
 ## Batch Work
 
-Use an existing project script or fill a [PBS template](templates.md). Bind
-queued experiments to the intended stable code/configuration snapshot when the
-project requires reproducibility. A submitted script is copied by PBS; referenced
-source and environment files still come from their paths when the job runs.
+Use an existing project script or adapt an example with
+[miyabi-pbs-shell-template](../../miyabi-pbs-shell-template/SKILL.md). Bind queued
+experiments to a stable code/configuration snapshot when the project requires
+reproducibility. PBS copies the submitted script; referenced source and
+environment files are read from their paths when the job runs.
 
 Before `qsub <script>`, run `bash -n <script>`, inspect the final placeholders,
 queue, group, resources, paths, module setup and outputs. PBS directives require
@@ -82,3 +86,5 @@ the JSON helper. If submission has an uncertain result, reconcile current/histor
 jobs and logs before retrying to avoid duplicates. Correct a rejected request
 before retrying; changing or cancelling jobs remains subject to the authorized
 scope. Interpret completion with [job results](qstat.md#interpret-results).
+
+After capturing the job ID, apply the [long-job wake-up rule](../SKILL.md#long-jobs).

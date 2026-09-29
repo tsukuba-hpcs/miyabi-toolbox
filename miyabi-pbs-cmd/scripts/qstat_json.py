@@ -18,7 +18,7 @@ HEADER = (
 )
 FIELDS = (
     "job_id", "job_name", "status", "project", "queue", "start_date",
-    "elapsed_seconds", "token", "nodes", "mig",
+    "elapsed_seconds", "token", "token_estimate", "nodes", "mig",
 )
 JOB_ID = re.compile(r"[0-9]+(?:\[(?:[0-9]+(?:-[0-9]+)?)?\])?(?:\.[A-Za-z0-9_.-]+)?")
 EMPTY_MESSAGES = {"No unfinished job found.", "No finished job found.", "No matching job found."}
@@ -104,14 +104,17 @@ def integer_cell(value):
 
 
 def token_cell(value):
+    """Return (usage, estimate); parentheses mark a not-yet-used amount, as on queued jobs."""
     if value == "-":
-        return None
-    if not re.fullmatch(r"(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)(?:\.[0-9]+)?", value):
+        return None, None
+    estimate = value.startswith("(") and value.endswith(")")
+    number = value[1:-1] if estimate else value
+    if not re.fullmatch(r"(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)(?:\.[0-9]+)?", number):
         raise ParseError("invalid token value")
-    result = float(value.replace(",", ""))
+    result = float(number.replace(",", ""))
     if not math.isfinite(result):
         raise ParseError("non-finite token value")
-    return result
+    return (None, result) if estimate else (result, None)
 
 
 def elapsed_cell(value):
@@ -124,7 +127,8 @@ def elapsed_cell(value):
 
 
 def start_date_cell(value):
-    if value in {"-", "--/-- --:--:--"}:
+    # "--:--:--" is observed for finished jobs that never started, e.g. deleted while queued.
+    if value in {"-", "--:--:--", "--/-- --:--:--"}:
         return None
     date = value
     if value.startswith("(") and value.endswith(")"):
@@ -150,7 +154,7 @@ def parse_row(line, name_start, status_start):
     elapsed, token, nodes, mig = cells[-4:]
     return dict(zip(FIELDS, (
         identifier, name, status, project, queue, start_date_cell(date),
-        elapsed_cell(elapsed), token_cell(token), integer_cell(nodes), integer_cell(mig),
+        elapsed_cell(elapsed), *token_cell(token), integer_cell(nodes), integer_cell(mig),
     )))
 
 

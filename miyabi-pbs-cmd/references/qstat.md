@@ -8,29 +8,29 @@ cover or to diagnose a helper failure; see [Native Fallback](#native-fallback).
 
 Run the helper in an established Miyabi shell with `qstat` on
 `PATH`; it does not connect over SSH. Python 3.9+ and the standard library are
-sufficient; no project environment or module loading is needed. Paths below
-are relative to this skill directory; use its absolute path from another cwd.
+sufficient; no project environment or module loading is needed. Set
+`SKILL_ROOT` as in [SKILL.md](../SKILL.md) so the commands work from any cwd.
 
 ```bash
 # Current user's active jobs
-/usr/bin/python3 -I scripts/qstat_json.py
+/usr/bin/python3 -I "$SKILL_ROOT/scripts/qstat_json.py"
 
 # One active job (inside an allocation, use "$PBS_JOBID")
-/usr/bin/python3 -I scripts/qstat_json.py 1234567
+/usr/bin/python3 -I "$SKILL_ROOT/scripts/qstat_json.py" 1234567
 
 # A bounded history query with only the needed fields
-/usr/bin/python3 -I scripts/qstat_json.py -H --hday 3 --hnum 10 \
+/usr/bin/python3 -I "$SKILL_ROOT/scripts/qstat_json.py" -H --hday 3 --hnum 10 \
   --fields job_id,job_name,status,elapsed_seconds
 
 # Status counts within the queried history window
-/usr/bin/python3 -I scripts/qstat_json.py -H --hday 7 --hnum 100 --summary
+/usr/bin/python3 -I "$SKILL_ROOT/scripts/qstat_json.py" -H --hday 7 --hnum 100 --summary
 
 # Filter active jobs; repeat --status to include multiple states
-/usr/bin/python3 -I scripts/qstat_json.py --status running --status queued
+/usr/bin/python3 -I "$SKILL_ROOT/scripts/qstat_json.py" --status running --status queued
 
 # Specific completed job, or array subjobs (quote array IDs)
-/usr/bin/python3 -I scripts/qstat_json.py -H 1234567
-/usr/bin/python3 -I scripts/qstat_json.py -t '1234567[]'
+/usr/bin/python3 -I "$SKILL_ROOT/scripts/qstat_json.py" -H 1234567
+/usr/bin/python3 -I "$SKILL_ROOT/scripts/qstat_json.py" -t '1234567[]'
 ```
 
 Each invocation makes one read-only query, with no polling or retries. History
@@ -63,17 +63,20 @@ Stdout is one compact JSON document (`--pretty` adds indentation):
 | `start_date` | string or null | Source `MM/DD HH:MM:SS`; parentheses mean a predicted start. No year or timezone is inferred |
 | `elapsed_seconds` | integer or null | Displayed ELAPSE converted to seconds, allowing hours above 24 |
 | `token` | number or null | Displayed, rounded token usage; grouping commas removed |
+| `token_estimate` | number or null | Parenthesized TOKEN shown before usage exists, e.g. `(2.0)` on a queued job; not usage |
 | `nodes`, `mig` | integer or null | Requested node/MIG counts, not observed utilization |
 
-Missing values such as `-` and `--:--:--` become `null`, not zero. The job table
-does not supply an exit code. Use detailed job output and application logs to
-decide whether a finished job succeeded.
+Missing values such as `-` and `--:--:--` become `null`, not zero. A `FINISH`
+row with null `start_date` and `elapsed_seconds` never started, for example
+because it was deleted while queued. The job table does not supply an exit
+code. Use detailed job output and application logs to decide whether a
+finished job succeeded.
 
 Exit status is 0 on success, 1 for execution/parse failures, and 2 for invalid
 arguments. Failures emit `ok:false` and `error.type`/`error.message`; command
-and parse failures include available diagnostics, capped at 4096 characters
-per stream. No partial job list is returned on failure. Unknown output fails
-explicitly instead of being treated as zero jobs. The default command timeout
+and parse failures include available diagnostics, truncated after 4096 characters
+per stream with a truncation marker. No partial job list is returned on failure.
+Unknown output fails explicitly instead of being treated as zero jobs. The default command timeout
 is 30 seconds, configurable with `--timeout`. Only `--help` emits plain text.
 
 Keep `ok:false` and its diagnostics visible; never replace a failed query with
