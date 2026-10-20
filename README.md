@@ -1,15 +1,17 @@
 # miyabi-toolbox
 
-Agent skills for working with the Miyabi supercomputer's PBS scheduler from
-Claude Code and Codex. Each skill is Markdown guidance plus standard-library
-Python and Bash; nothing needs installing beyond placing the skill directories
-where the agent looks for skills.
+Agent skills for working on the Miyabi supercomputer from Claude Code, Codex
+and pi: its PBS scheduler, and the ML experiment platforms built on it. Each
+skill is Markdown guidance plus standard-library Python and Bash; nothing needs
+installing beyond linking the skill directories where the agent looks for
+skills.
 
 | Skill | Use it to | Ships |
 | --- | --- | --- |
 | [miyabi-pbs-cmd](miyabi-pbs-cmd/SKILL.md) | Query, submit and control jobs with Miyabi's `qstat`/`qsub`/`qdel`/`tracejob` dialect, and decide whether work may run on a login node or needs a compute allocation | `context.py` (host and allocation guard), `qstat_json.py` (jobs and history as JSON), qstat/qsub references |
 | [miyabi-pbs-shell-template](miyabi-pbs-shell-template/SKILL.md) | Write or fix `.pbs` scripts: single node, `torchrun`, Open MPI workers; modules, Python environments, storage, Accelerate, vLLM | Three templates in `assets/pbs/` and workload references |
 | [miyabi-pbs-goal-wakeup](miyabi-pbs-goal-wakeup/SKILL.md) | Let an agent sleep through a job whose queue wait plus runtime exceeds an hour and be woken when it ends | `job_wakeup.py`, a PBS poller that wakes a Codex Goal or a Claude Code session |
+| [miyabi-ml-experiment-platform](miyabi-ml-experiment-platform/SKILL.md) | Design, build, port or audit the platform behind train → evaluate → statistics experiments (late-binding pilot jobs, walltime from measured smoke runs, cost gates, in-place evaluation, retention, streaming statistics) and plan experiments on it | `pbs_time_report.py` (queue wait, run time, used walltime and GPU use from `qstat -H -f`), references distilled from the fedcl project |
 
 ## How the skills fit together
 
@@ -24,8 +26,12 @@ where the agent looks for skills.
 4. **Interpret the result** with cmd's [job queries](miyabi-pbs-cmd/references/qstat.md):
    `FINISH` alone never establishes success.
 
-The skills reference each other by relative path, so install all three side by
-side.
+For a whole experiment rather than one job,
+[platform](miyabi-ml-experiment-platform/SKILL.md) designs the system that
+submits and tracks the jobs, and uses the three skills above for the mechanics.
+
+The skills reference each other by name or relative path, so install them side
+by side.
 
 ## Requirements
 
@@ -38,25 +44,30 @@ side.
 
 ## Install
 
-Link the three skill directories into each agent's skills directory:
+Clone the repository anywhere and link every skill directory into each agent's
+skills directory (`ln -sfn` also repoints existing links):
 
 ```bash
 TOOLBOX=/absolute/path/to/miyabi-toolbox
-for skill in miyabi-pbs-cmd miyabi-pbs-shell-template miyabi-pbs-goal-wakeup; do
-  ln -s "$TOOLBOX/$skill" ~/.claude/skills/"$skill"   # Claude Code
-  ln -s "$TOOLBOX/$skill" ~/.codex/skills/"$skill"    # Codex
+mkdir -p ~/.claude/skills ~/.codex/skills ~/.pi/agent/skills
+for dir in "$TOOLBOX"/*/; do
+  [ -f "$dir/SKILL.md" ] || continue
+  skill=$(basename "$dir")
+  ln -sfn "$TOOLBOX/$skill" ~/.claude/skills/"$skill"     # Claude Code
+  ln -sfn "$TOOLBOX/$skill" ~/.codex/skills/"$skill"      # Codex
+  ln -sfn "$TOOLBOX/$skill" ~/.pi/agent/skills/"$skill"   # pi
 done
 ```
 
-In the maintainer's setup this repository's root *is* `~/.codex/skills`, so only
-the Claude Code links exist (`~/.claude/skills/miyabi-*` point into it); skip the
-Codex line in that case. The root `.gitignore` tracks only `miyabi-*` and this
-README, so the directory can also hold unrelated skills.
+In the maintainer's setup the repository is `/work/xg24i002/x10041/miyabi-toolbox`;
+self-made skills are kept here and linked into all three agents. pi loads every
+skill, but goal-wakeup's wake-up flows exist only for Codex and Claude Code.
 
 ## Use
 
 Agents load a skill from its description. To name one explicitly, use
-`/miyabi-pbs-cmd` in Claude Code or `$miyabi-pbs-cmd` in Codex. The helpers also
+`/miyabi-pbs-cmd` in Claude Code, `$miyabi-pbs-cmd` in Codex or
+`/skill:miyabi-pbs-cmd` in pi. The helpers also
 run by hand; set `SKILL_ROOT` to the installed skill directory:
 
 ```bash
@@ -112,4 +123,7 @@ login-node probe validated only their refusal, and no live Miyabi-C allocation o
 distributed run has validated them
 ([template validation scope](miyabi-pbs-shell-template/references/templates.md#validation-scope)).
 The wake-up flows have recorded live results only for the cases listed in
-[validation](miyabi-pbs-goal-wakeup/references/validation.md).
+[validation](miyabi-pbs-goal-wakeup/references/validation.md). The platform
+skill condenses one project's experience (fedcl, 2026-10-08 → 20): its numbers
+are dated, its status labels say what ran on Miyabi, and `pbs_time_report.py`
+was checked against live `qstat -H -f` output.

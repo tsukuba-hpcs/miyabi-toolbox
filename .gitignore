@@ -1,7 +1,3 @@
-# This directory is the Codex skills directory. Track only the miyabi skills
-# and the README; the other skills here are managed elsewhere. Each skill keeps
-# its own .gitignore for caches, secrets and runtime state.
-/*
-!/.gitignore
-!/README.md
-!/miyabi-*/
+# Each skill keeps its own .gitignore for caches, secrets and runtime state.
+# skill-creator writes eval workspaces next to the skill directory.
+/*-workspace/

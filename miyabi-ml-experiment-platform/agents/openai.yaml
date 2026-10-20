@@ -1,0 +1,4 @@
+interface:
+  display_name: "Miyabi ML Experiment Platform"
+  short_description: "Design, run and audit ML experiment platforms on Miyabi PBS"
+  default_prompt: "Use $miyabi-ml-experiment-platform to design, build or audit the experiment platform for this Miyabi project."

@@ -1,0 +1,36 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editors and temporary files
+.idea/
+.vscode/
+*.code-workspace
+*.swp
+*.swo
+*~
+*.tmp
+*.bak
+*.orig
+
+# Python environments, caches, and test artifacts
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Logs and PBS output files
+*.log
+*.o[0-9]*
+*.e[0-9]*
