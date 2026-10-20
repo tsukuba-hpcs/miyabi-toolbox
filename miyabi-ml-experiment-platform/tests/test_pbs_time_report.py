@@ -2,9 +2,10 @@
 
     /usr/bin/python3 -I -m unittest discover -s tests
 
-The fixture holds three real Miyabi-G records (Variable_List removed): an
-11-node regular-g pilot routed to small-g (3615444), a one-node debug-g pilot
-(3584931) and an 11-node job deleted while still queued (3549989).
+The fixture holds three real Miyabi-G records, anonymized (user, group, paths,
+job and variable names replaced; Variable_List removed): an 11-node regular-g
+pilot routed to small-g (3615444), a one-node debug-g pilot (3584931) and an
+11-node job deleted while still queued (3549989).
 """
 from __future__ import annotations
 
@@ -36,7 +37,7 @@ class ParseTest(unittest.TestCase):
     def test_wrapped_values_are_joined(self):
         fields = self.records["3615444"]
         self.assertEqual(len(report_module.per_node(fields["resources_used.gpu_avg_util_per_nodes"])), 11)
-        self.assertTrue(fields["Error_Path"].endswith("/h0004d/control/pbs/fedcl-n11.e3615444"))
+        self.assertTrue(fields["Error_Path"].endswith("/proj/a/control/pbs/exp-n11.e3615444"))
 
     def test_started_job(self):
         row = report_module.job_row("3615444", self.records["3615444"])
@@ -78,7 +79,7 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(overall["gpu_util_pct"], 20.6)
 
     def test_name_filter_and_rows(self):
-        _, out = run("--from-file", str(FIXTURE), "--name", "fedcl-n", "--jobs")
+        _, out = run("--from-file", str(FIXTURE), "--name", "exp-n", "--jobs")
         document = json.loads(out)
         self.assertEqual([row["job_id"] for row in document["rows"]], ["3584931", "3615444"])
 

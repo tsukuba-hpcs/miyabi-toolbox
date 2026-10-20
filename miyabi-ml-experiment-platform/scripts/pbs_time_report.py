@@ -22,8 +22,8 @@ count. Per group and overall:
 - node-hours used and requested by the jobs that started;
 - GPU utilization: the per-node averages PBS records, weighted by node time.
   PBS seems to average utilization and power over only about the last hour
-  of a job (inferred: in 11-node job 3585013, eight client GPUs that trained
-  for the first 29 min of 112, at 31 GB, record a maximum utilization of 0;
+  of a job (inferred: in an 11-node job, eight worker GPUs that trained for
+  the first 29 min of 112, at 31 GB, record a maximum utilization of 0;
   memory peaks do cover the whole job). For longer jobs it shows how the job
   ended, not its average: count idle nodes from task timelines instead;
 - hours that never-started jobs spent queued before they were removed

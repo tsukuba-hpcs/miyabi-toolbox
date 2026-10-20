@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Pilot job template: the job binds a task and the released code when it
+# starts, never at qsub. The controller submits it with
+#   qsub -q <queue> -l select=<N>:mpiprocs=1 -l walltime=<HH:MM:SS> -N <exp>-n<N>
+#        -v EXP_ROOT=<R>,EXP_WALLTIME_S=<seconds>,EXP_QUEUE=<queue>,EXP_PILOT_SCRIPT=<this file>
+# and adds EXP_SNAPSHOT=<snapshot> for a release test. Fill every <...> below.
+#PBS -W group_list=<literal_project_group>
+#PBS -j oe
+set -Eeuo pipefail
+: "${EXP_ROOT:?}" "${EXP_WALLTIME_S:?}" "${EXP_QUEUE:?}" "${EXP_PILOT_SCRIPT:?}"
+
+# Refuse to run anywhere but a Miyabi-G compute allocation.
+MIYABI_PBS_CMD_ROOT="<absolute_miyabi-pbs-cmd_directory>"
+/usr/bin/python3 -I "$MIYABI_PBS_CMD_ROOT/scripts/context.py" --target-system Miyabi-G --require-compute >/dev/null
+# Without the miyabi-pbs-cmd skill, replace the two lines above with at least:
+# [[ "${PBS_JOBID:-}" =~ ^[0-9]+ && "$(hostname -s)" =~ ^mg[0-9]+$ && "$(uname -m)" == aarch64 ]] || { echo "Not a Miyabi-G compute node" >&2; exit 2; }
+
+if [[ -z "${EXP_SNAPSHOT:-}" ]]; then
+  # Bind whatever is released now. A pilot can start before the first release is
+  # published: a multi-node one waits up to 10 min rather than throw away its
+  # queue wait (unverified), a 1-node one exits.
+  wait_s=0
+  (( $(sort -u "$PBS_NODEFILE" | wc -l) > 1 )) && wait_s=600
+  until [[ -f "$EXP_ROOT/control/release.json" ]]; do
+    (( wait_s > 0 )) || { echo "No release published yet; exiting"; exit 0; }
+    sleep 30
+    wait_s=$(( wait_s - 30 ))
+  done
+  EXP_SNAPSHOT=$(/usr/bin/python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["snapshot"])' "$EXP_ROOT/control/release.json")
+fi
+export EXP_SNAPSHOT
+
+export PAGER=cat MODULES_PAGER=cat LMOD_PAGER=cat
+module load nvidia/25.9 nv-hpcx/25.9 cuda/13.2 >/dev/null 2>&1   # match your torch build
+# GCC toolset 14 builds torch.compile's aarch64 (SVE2) kernels; keep the NVHPC/HPC-X runtime.
+GCC14=/opt/rh/gcc-toolset-14/root/usr
+export CC="$GCC14/bin/gcc" CXX="$GCC14/bin/g++"
+export COMPILER_PATH="$GCC14/bin${COMPILER_PATH:+:$COMPILER_PATH}"
+export LD_LIBRARY_PATH="$GCC14/lib64:$GCC14/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LIBRARY_PATH="$GCC14/lib64:$GCC14/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
+
+# This experiment's venv: synced once on the login node, never re-synced while queued work uses it.
+PYTHON_BIN="<absolute_experiment_venv>/bin/python"
+export PYTHON_BIN PATH="${PYTHON_BIN%/*}:$PATH"
+export HF_HOME="<shared_hf_home_on_work>" HF_HUB_OFFLINE=1
+PILOT_MODULE="<pkg>.control.pilot"
+
+# The pilot sets each task's threads, caches (on /local), GPU and PYTHONPATH.
+cd "$EXP_SNAPSHOT"
+exec env PYTHONPATH="$EXP_SNAPSHOT/src" "$PYTHON_BIN" -m "$PILOT_MODULE"

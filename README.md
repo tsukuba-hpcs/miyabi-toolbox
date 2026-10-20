@@ -11,7 +11,7 @@ skills.
 | [miyabi-pbs-cmd](miyabi-pbs-cmd/SKILL.md) | Query, submit and control jobs with Miyabi's `qstat`/`qsub`/`qdel`/`tracejob` dialect, and decide whether work may run on a login node or needs a compute allocation | `context.py` (host and allocation guard), `qstat_json.py` (jobs and history as JSON), qstat/qsub references |
 | [miyabi-pbs-shell-template](miyabi-pbs-shell-template/SKILL.md) | Write or fix `.pbs` scripts: single node, `torchrun`, Open MPI workers; modules, Python environments, storage, Accelerate, vLLM | Three templates in `assets/pbs/` and workload references |
 | [miyabi-pbs-goal-wakeup](miyabi-pbs-goal-wakeup/SKILL.md) | Let an agent sleep through a job whose queue wait plus runtime exceeds an hour and be woken when it ends | `job_wakeup.py`, a PBS poller that wakes a Codex Goal or a Claude Code session |
-| [miyabi-ml-experiment-platform](miyabi-ml-experiment-platform/SKILL.md) | Design, build, port or audit the platform behind train → evaluate → statistics experiments (late-binding pilot jobs, walltime from measured smoke runs, cost gates, in-place evaluation, retention, streaming statistics) and plan experiments on it | `pbs_time_report.py` (queue wait, run time, used walltime and GPU use from `qstat -H -f`), references distilled from the fedcl project |
+| [miyabi-ml-experiment-platform](miyabi-ml-experiment-platform/SKILL.md) | Design, build or audit the platform behind train → evaluate → statistics experiments (late-binding pilot jobs, walltime from measured smoke runs, cost gates, in-place evaluation, retention, streaming statistics) and plan experiments on it | `pbs_time_report.py` (queue wait, run time, used walltime and GPU use from `qstat -H -f`), a pilot job template, references with the measured costs behind each rule |
 
 ## How the skills fit together
 
@@ -124,6 +124,6 @@ distributed run has validated them
 ([template validation scope](miyabi-pbs-shell-template/references/templates.md#validation-scope)).
 The wake-up flows have recorded live results only for the cases listed in
 [validation](miyabi-pbs-goal-wakeup/references/validation.md). The platform
-skill condenses one project's experience (fedcl, 2026-10-08 → 20): its numbers
-are dated, its status labels say what ran on Miyabi, and `pbs_time_report.py`
-was checked against live `qstat -H -f` output.
+skill condenses experiments run on Miyabi-G in October 2026: its numbers are
+dated, its status labels say what ran on Miyabi, and `pbs_time_report.py` was
+checked against live `qstat -H -f` output.

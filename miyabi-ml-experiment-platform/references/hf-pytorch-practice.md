@@ -1,10 +1,8 @@
 # HF / PyTorch practice on Miyabi-G
 
-Settings fedcl converged on for Transformers, PEFT and lm-evaluation-harness
-on GH200 (aarch64), and how to adopt a faster kernel without contaminating a
-comparison. The reference code is in the fedcl repository
-([reference-implementation.md](reference-implementation.md)): `src/fedcl/training.py`,
-`src/fedcl/evaluation.py`, `src/fedcl/versions.py` and `scripts/pilot.pbs`.
+Settings that worked for Transformers, PEFT and lm-evaluation-harness on GH200
+(aarch64), and how to adopt a faster kernel without contaminating a
+comparison.
 
 ## Contents
 
@@ -33,11 +31,11 @@ comparison. The reference code is in the fedcl repository
 - **Seeds**: derive every seed from (experiment seed, purpose label), e.g.
   `derive_seed(seed, "lora")`; no ad-hoc constants.
 - **Timing**: record each part (load, compile, training, validation,
-  generation, gates) in `result.json` under `timing`. The cost model fits
-  these; totals alone cannot be scaled.
+  generation, method-specific steps) in `result.json` under `timing`. The
+  cost model fits these; totals alone cannot be scaled.
 - **Logs**: write progress lines from code straight into `train.log`; a
-  framework may swallow stdout (a Flower ServerApp's output only reaches
-  `flwr log`).
+  framework may swallow stdout (some send a server process's output only to
+  their own log command).
 
 ## 2 Evaluation
 
@@ -54,25 +52,25 @@ comparison. The reference code is in the fedcl repository
 - The evaluation batch is a speed knob, not a protocol item: switch to a faster
   one any time and record it in every result. Bigger is not always faster
   (Qwen: 16 beat 32–64).
-- **LoRA merged or not.** fedcl evaluated unmerged: bf16 base, fp32 LoRA, and
-  the evaluation code refuses other dtypes. `merge_and_unload` is faster but
-  rounds W + BA to bf16, so scores are not bitwise identical and greedy
-  generation differs on some questions. Evaluate every model of one
-  comparison the same way and never switch mid-experiment. Cost of staying
-  unmerged: rank-160 adapters took 1.2–3.4× their rank-16 parents' GSM8K time
-  (HumanEval and IFEval ~1×; cause not found).
-- **Next experiment** (the user's decision for fedcl): first probe the same
-  adapter merged vs unmerged (time and per-question agreement) together with
-  repeated evaluations (same node, across nodes, 1 vs 2 lanes); then evaluate
-  merged from the first evaluation. Comparisons with older unmerged results
-  then mix modes — say so wherever they appear.
+- **LoRA merged or not.** Unmerged evaluation (bf16 base, fp32 LoRA) uses the
+  trained parameters exactly; `merge_and_unload` is faster but rounds W + BA to
+  bf16, so scores are not bitwise identical and greedy generation differs on
+  some questions. Unmerged cost: rank-160 adapters (ten rank-16 adapters
+  stacked by a merge step) took 1.2–3.4× their rank-16 sources' GSM8K time
+  (HumanEval and IFEval ~1×; cause not found). Default:
+  first probe one adapter merged vs unmerged (time and per-question agreement)
+  together with repeated evaluations (same node, across nodes, 1 vs 2 lanes),
+  then evaluate merged from the first evaluation on. Evaluate every model of
+  one comparison the same way and never switch mid-experiment; where results
+  from the other mode appear next to them, say so.
 - **Log-softmax precision.** Comparing summed label log-likelihoods in bf16
   rounds close labels together (0.0625 apart near −10) and breaks ties toward
-  the first label; fedcl forces fp32 for its own multiple-choice tasks.
+  the first label; compute it in fp32 in your own multiple-choice tasks.
   Whether the harness's upstream tasks (MMLU, FPB) compute it in bf16 is
   unverified and is one lead for the evaluation noise
   ([experiment-lifecycle.md](experiment-lifecycle.md) §4). Check it before
-  freezing the protocol.
+  freezing the protocol: in a short compute job, print the dtype of the logits
+  the harness's log-likelihood path passes to `log_softmax` for your model.
 
 ## 3 Environment and venvs
 
@@ -80,30 +78,33 @@ comparison. The reference code is in the fedcl repository
 | --- | --- | --- |
 | `PYTHONPATH` | `<snapshot>/src` | run the released code, never the working tree |
 | project install | none: `uv sync --locked --no-install-project` | an editable install points at one worktree; a process that forgot `PYTHONPATH` (e.g. an `mpirun` remote rank) silently imports that worktree instead of failing |
-| venv | one `.venv` per experiment worktree, synced on the target system's login node (G2-1: 24 s, packages hard-linked from the uv cache); never re-synced while an experiment uses it; a dependency change means a new venv | queued jobs must not see dependencies change; another experiment's venv is not yours to touch |
+| venv | one `.venv` per experiment worktree, synced on the target system's login node (24 s with packages hard-linked from the uv cache); never re-synced while an experiment uses it; a dependency change means a new venv and a pilot script pointing at it | queued jobs must not see dependencies change (pilots queued earlier keep the old venv: PBS copied their script at `qsub`); another experiment's venv is not yours to touch |
 | `HF_HOME`, `HF_HUB_OFFLINE=1` | shared directory on /work; pinned revisions | compute nodes do not download |
-| `TORCHINDUCTOR_CACHE_DIR`, `TRITON_CACHE_DIR` | `/local/$USER/<framework>/<job>/<task>/…` | one 11-node deployment wrote ~26,000 cache files |
+| `TORCHINDUCTOR_CACHE_DIR`, `TRITON_CACHE_DIR` | `/local/$USER/<pkg>/<job>/<task>/…` | one 11-node run wrote ~26,000 cache files |
 | `CC`, `CXX`, `COMPILER_PATH`, `LD_LIBRARY_PATH`, `LIBRARY_PATH` | GCC toolset 14 (`/opt/rh/gcc-toolset-14/root/usr/{bin,lib64,lib}`) | Inductor's SVE2 kernels on aarch64 |
-| `module load` | `nvidia/25.9 nv-hpcx/25.9 cuda/13.2` | matches torch 2.14 + cu132 |
+| `module load` | `nvidia/25.9 nv-hpcx/25.9 cuda/13.2` | matches torch 2.14 + cu132 (2026-10) |
+| torch | the aarch64 CUDA build from the PyTorch index: `https://download.pytorch.org/whl/cu132` as a `[[tool.uv.index]]`, torch pinned to it (`torch==2.14.0+cu132` worked, 2026-10) | the build must match the `cuda` module |
 | `CUDA_VISIBLE_DEVICES` | one GPU per process | |
 | `OMP_NUM_THREADS=8`, `OPENBLAS_NUM_THREADS=1`, `TOKENIZERS_PARALLELISM=false` | | lanes sharing a node must not fight over cores |
 | `ARROW_DEFAULT_MEMORY_POOL=system` | | jemalloc on many-core aarch64 burns system time even on small parquet reads |
 | CUDA extensions without an aarch64 wheel | build the wheel in a compute job for `sm_90` only, keep it in a /work wheel directory with its SHA-256, point `pyproject.toml` at it (path source; `uv.lock` records the hash) | login nodes do not compile; a swapped wheel is detected |
 | environment provenance | every result records the numeric packages' versions (torch, transformers, peft, trl, kernel packages) | results from before and after a kernel or upgrade stay distinguishable |
-| optional kernels | import the kernel package explicitly at model load and fail the task if it is missing | transformers silently falls back to the Torch reference with one warning; a broken node then mixes implementations inside one deployment |
+| optional kernels | import the kernel package explicitly at model load and fail the task if it is missing | transformers silently falls back to the Torch reference with one warning; a broken node then mixes implementations inside one multi-node run |
 
 `mpirun` does not forward the caller's environment: pass every variable a
 remote process needs on its command line (`mpirun … /usr/bin/env K=V … python …`),
 `PYTHONPATH` included, and set `umask` there if the group must read its files.
 The job-script side (modules, guard, `mpirun` forms) is in the
-`miyabi-pbs-shell-template` skill; fedcl's `scripts/pilot.pbs` shows the full set.
+`miyabi-pbs-shell-template` skill. [`assets/pilot.pbs`](../assets/pilot.pbs)
+sets the job-level part (guard, modules, compilers, venv, `HF_*`); the pilot
+sets the per-task part (threads, caches, GPU, `PYTHONPATH`). A plain job
+script without a pilot sets both itself.
 
 **Decide the environment in the smoke.** Search the smoke logs for "falling
 back to the reference implementation"-style warnings and settle kernels before
-the first development result. G2-1 adopted causal-conv1d mid-search: imported
-Qwen screens ran on the Torch reference, later ones on the kernel, so those
-cells' screens mix two environments (each result's `environment` tells them
-apart).
+the first development result. A search that adopted causal-conv1d mid-way
+mixed two environments: its imported screens ran on the Torch reference,
+later ones on the kernel (each result's `environment` tells them apart).
 
 ## 4 Adopting a faster kernel
 
@@ -123,8 +124,8 @@ Install it, then decide with one single-GPU check job:
    an environment fact, with no science-version bump.
 
 Do not calibrate with "rerun the reference": training that is bitwise
-reproducible gives a distance of 0, and nothing can be judged against it
-(fedcl's first check did this and had to be redone). At a learning rate where
+reproducible gives a distance of 0, and nothing can be judged against it (a
+first check did this and had to be redone). At a learning rate where
 trajectories are chaotic under rounding (every pairwise endpoint distance close
 to the update itself), short training cannot decide anything; it only shows
 that results at that rate carry rounding-level noise.
@@ -133,7 +134,7 @@ Example, causal-conv1d 1.7.0 on Qwen3.5 (2026-10-16): operator errors within
 upstream tolerances (fp32 2.4e-7, bf16 7.8e-3); one LoRA gradient batch 4.4%
 from eager (compiled reference vs eager: 3.7%); 64 updates at lr 1e-4: endpoint
 distance / update 0.037 for the kernel vs 0.095 for the rounding-only variant
-(V difference 0.005 vs 0.012); at lr 1e-3 all pairs 0.77–0.96 (chaotic).
-Result: 0.43 → 0.37 s per update (−14%), peak memory 75.3 → 72.1 GB. The first
-build failed at link time on `libctf.so` until GCC toolset 14's `lib64` was on
-`LD_LIBRARY_PATH`; then it built in 238 s.
+(validation-score difference 0.005 vs 0.012); at lr 1e-3 all pairs 0.77–0.96
+(chaotic). Result: 0.43 → 0.37 s per update (−14%), peak memory 75.3 → 72.1 GB.
+The first build failed at link time on `libctf.so` until GCC toolset 14's
+`lib64` was on `LD_LIBRARY_PATH`; then it built in 238 s.
