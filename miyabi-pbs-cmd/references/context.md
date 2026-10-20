@@ -12,9 +12,12 @@ SKILL_ROOT="/absolute/path/to/miyabi-pbs-cmd"
 ```
 
 Use the actual workload target: `Miyabi-G` (`aarch64`) or `Miyabi-C` (`x86_64`).
-Both commands emit JSON containing host role, observed/target architecture,
-PBS job ID, nodefile hosts, `allocation_confirmed`, `runtime_execution_allowed`
-and refusal `reasons`. `--pretty` adds indentation.
+Both commands emit JSON containing `node_role` (`login`, `compute` or
+`unknown`), the recognized Miyabi `system` (or null), observed/target
+architecture, PBS job ID, nodefile hosts, `allocation_confirmed`,
+`runtime_execution_allowed` and refusal `reasons`. `--pretty` adds indentation.
+[The plane table](../SKILL.md#establish-the-operating-plane) maps these fields to
+what an agent may run.
 
 - Inspection exits 0 with `ok:true` even when runtime execution is disallowed.
 - `--require-compute` requires `--target-system`. It exits 1 with `ok:false`

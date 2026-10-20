@@ -27,10 +27,15 @@ and `sys.prefix` before treating `ModuleNotFoundError` as a missing dependency.
 A source snapshot may use an existing external environment when the project
 explicitly selects it. See [Python venv](https://docs.python.org/3/library/venv.html).
 
-## Create Or Synchronize On The Target
+## Create Or Synchronize On The Target System's Login Node
 
-Choose the needed operation for the project's dependency format; these are
-alternatives, not a sequence:
+Set up the environment on the login node of the system the jobs run on
+(`miyabi-g*` for G, `miyabi-c*` for C). When a dependency has no wheel for the
+target and compiles from source, run that install in an interactive compute
+allocation of the same system instead (`qsub -I`, see the
+[interactive work](../../miyabi-pbs-cmd/references/qsub.md#interactive-work)
+notes). Choose the needed operation for the project's dependency format; these
+are alternatives, not a sequence:
 
 ```bash
 uv venv --python <project-python-version> .venv
@@ -38,8 +43,9 @@ uv sync --locked                    # uv-managed project with an existing lock
 uv pip install --python "$PYTHON_BIN" -r requirements.txt
 ```
 
-`uv run` can synchronize the environment before executing its command. Account
-for that work when choosing where to run it; `--no-sync` does not repair an
+`uv run` can synchronize the environment before executing its command: in a job
+script use the virtualenv interpreter or `uv run --no-sync`, so the job runs the
+environment prepared on the login node; `--no-sync` does not repair an
 architecture mismatch. Preserve the project's lockfile policy rather than
 upgrading dependencies to solve a login-side execution error.
 See [uv project execution](https://docs.astral.sh/uv/concepts/projects/run/).

@@ -28,7 +28,7 @@ Read only the details relevant to the shell being written:
 
 - [Modules](references/module.md): discovery and shell initialization.
 - [Python environments](references/python-env.md): architecture, interpreter
-  identity, and environment setup inside the target allocation.
+  identity, and environment setup on the target system's login node.
 - [Storage and network](references/filesystem-network.md): scratch, quotas,
   network and containers.
 - [Open MPI](references/mpi.md): placement and per-rank environment.

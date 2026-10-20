@@ -1,6 +1,6 @@
 ---
 name: miyabi-pbs-cmd
-description: Query, submit and control Miyabi PBS jobs using the site's qstat, qsub, qdel and tracejob dialect, and decide whether work may run on a login node or needs a compute allocation. Use for job status/history, queue limits, interactive or batch submission and cancellation. Prefer bundled scripts for JSON job/history and host/allocation information.
+description: Operate Miyabi PBS safely. First establish whether the shell is a login/control node, a confirmed PBS compute allocation or unknown, and keep heavy CPU/memory work off login nodes. Query, submit and control jobs using the site's qstat, qsub, qdel and tracejob dialect. Use at the start of any Miyabi session, before running tests, builds, training or inference, and for job status/history, queue limits, interactive or batch submission and cancellation. Prefer bundled scripts for JSON job/history and host/allocation information.
 ---
 
 # Miyabi PBS Commands
@@ -22,11 +22,31 @@ The helpers inspect local context and query jobs; they do not submit jobs or
 implement resource/limit queries. Use native commands for those operations.
 Do not hide helper failures as empty job lists.
 
-Miyabi-G is `aarch64`; Miyabi-C is `x86_64`. Choose the workload target
-independently of the login host. Before application execution, require exit 0
-from `context.py --target-system <target> --require-compute` and check the job's
-live state. See the [context helper contract](references/context.md) for JSON
-fields and guard behavior.
+## Establish The Operating Plane
+
+Before running anything beyond reading and editing files, and again whenever the
+shell changes (new SSH session, entering or leaving an allocation, a restarted
+PTY), run `context.py` for the project's target system and state the plane in one
+line, for example `Plane: login/control (miyabi-g1, aarch64); target Miyabi-G; no
+allocation`. Do not infer the plane from the prompt, the working directory or
+earlier turns.
+
+| Plane | Evidence from `context.py` | Allowed work |
+| --- | --- | --- |
+| Login/control | `node_role: login` (`miyabi-g*`, `miyabi-c*`, `interact-g*`, `interact-c*`) | Control-class work only; see [Execution Boundaries](#execution-boundaries) |
+| Confirmed compute | `runtime_execution_allowed: true`: a compute host (`mg<N>`, `mc<N>`), a valid PBS job ID, a nodefile containing this host, and a matching target | The user-authorized workload |
+| Not confirmed | Anything else: an unknown host (local machine, unfamiliar hostname), a compute host without valid job/nodefile evidence, or an allocation of the wrong system for the target | Treat as control-plane at most; read `reasons`, then reach or obtain the right shell |
+
+Keep three things separate: the node role (where this shell runs), the host
+architecture, and the project's target system, which comes from the workload
+rather than the login host. Miyabi-G is `aarch64`; Miyabi-C is `x86_64`. A G
+project edited on a C login node still needs a G allocation, and inherited PBS
+variables, a familiar hostname or a matching architecture never turn a login or
+unknown shell into compute. Before application execution, require exit 0 from
+`context.py --target-system <target> --require-compute` and check the job's live
+state. See the [context helper contract](references/context.md) for JSON fields
+and guard behavior. When reporting results, name the plane and, for compute work,
+the host and job ID.
 
 ## Execution Boundaries
 
@@ -38,11 +58,35 @@ underlying load restrictions.
 | --- | --- |
 | File/repository edits, scheduler/module inspection, authorized submission | Login/control plane |
 | Small host-native utilities, `bash -n`, existing compatible static tools such as Ruff; this skill's stdlib offline tests | Login, when project rules permit |
-| Project test suites, runtime validators, application/ML imports, environment synchronization, dependency builds, preprocessing, training, inference, MPI/CUDA operations | Matching PBS compute allocation |
+| Environment setup from prebuilt wheels: creating or synchronizing virtualenvs, installing dependencies, downloading interpreters (`uv venv`, `uv init`, `uv add`, `uv sync`, `uv pip install`) | Login node of the target system (`miyabi-g*` for G, `miyabi-c*` for C), with `timeout` |
+| Installing a package that compiles from source (no wheel for the target, or a build from a source tree) | Interactive compute allocation of the target system (see [qsub.md](references/qsub.md#interactive-work)) |
+| Project test suites, runtime validators, application/ML imports, preprocessing, training, inference, MPI/CUDA operations | Matching PBS compute allocation |
 
 A compatible `.venv` does not change a command's workload class. Route an
-incompatible binary to its target architecture instead of recreating the shared
-environment on login. Honor stricter project execution rules.
+incompatible binary to its target architecture rather than replacing a working
+environment; build each system's environment on that system's login node. Honor
+stricter project execution rules.
+
+Classify each login-side command by what it can consume, not by how it is
+invoked. Work that may use sustained CPU, many threads or processes, large
+memory, heavy I/O or a GPU is workload-class, and so is anything whose cost you
+cannot bound. Beyond the table's examples, this includes parallel builds
+(`make -j`, a package compiling from source during an install), compressing or extracting large
+archives, recursive scans of large trees (`find`, `du`, `grep -r` over data or
+scratch), loading a large file or log whole into memory, and heavy imports such
+as `python -c 'import torch'`. Smaller inputs or `nice` do not reclassify a
+command when imports, model loading or compilation dominate.
+
+Keep login-side processing bounded: check sizes first (`ls -l`, `wc -c`), read a
+slice or stream (`head`, `tail -n`, `grep -m`), and cap runtime with `timeout`.
+If a login-side command runs longer or heavier than expected, stop your own
+process and move the work to compute.
+
+When a command is workload-class and the plane is not a confirmed matching
+allocation, do not run it. Use an interactive allocation for short iterative
+checks or a batch job for unattended work (see [qsub.md](references/qsub.md)). If
+allocating or submitting is not authorized, prepare the command or script, report
+what must run where, and stop instead of running a reduced version on login.
 
 Use a persistent interactive PTY for iterative compute checks and batch jobs
 for unattended or sustained work. In each allocation, establish modules in that
