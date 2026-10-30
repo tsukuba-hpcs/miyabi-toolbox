@@ -368,10 +368,12 @@ def ledger_query(settings: Settings, args: dict) -> dict:
                 totals["by_outcome"][state.get("outcome")] += 1
             submit = record.get("submit") or {}
             if submit.get("unit") and submit.get("requested_unit_hours") is not None:
-                totals["requested"][submit["unit"]] += submit["requested_unit_hours"]
+                # Sum whole unit-seconds, convert once: three 8-minute jobs request 0.4, not 0.399999.
+                totals["requested"][submit["unit"]] += int(submit.get("units") or 0) * int(submit.get("walltime_s") or 0)
             usage = record.get("usage") or {}
             if usage.get("unit"):
                 totals["used"][usage["unit"]] += usage["quantity"]
+        totals["requested"] = Counter({unit: seconds / 3600 for unit, seconds in totals["requested"].items()})
         return ok(project=str(store.project_dir), count=len(records),
                   summary={key: {k: round(v, 6) if isinstance(v, float) else v for k, v in counter.items()}
                            for key, counter in totals.items()})

@@ -213,7 +213,7 @@ def list_(settings: Settings, args: dict) -> dict:
     store = Store(settings)
     wanted = set(args.get("status") or [])
     items = [n for n in _all(store.state) if not wanted or n["status"] in wanted]
-    notifiers = {n["notifier"] for n in items if n["status"] in OPEN}
+    notifiers = {n["notifier"] for n in items}
     return ok(count=len(items), notifications=[{**_view(n), "pending_messages": sum(
         1 for m in n["outbox"] if m["status"] == "pending"), "fired_reason": (n.get("fired") or {}).get("reason")}
         for n in items], daemons=[daemon_info(settings, name) for name in sorted(notifiers)])

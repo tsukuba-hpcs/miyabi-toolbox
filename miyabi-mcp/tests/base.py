@@ -90,6 +90,7 @@ class FakePbsCase(unittest.TestCase):
     def submit(self, **overrides) -> dict:
         args = {"script": str(self.script), "queue": "debug-g", "walltime": "00:20:00", "name": "job-a"}
         args.update(overrides)
+        args = {key: value for key, value in args.items() if value is not None}
         plan = self.ok_call("job_submit", {**args, "dry_run": True})
         self.assertTrue(plan["valid"], plan["checks"])
         return self.ok_call("job_submit", {**args, "dry_run": False, "plan_digest": plan["plan_digest"]})

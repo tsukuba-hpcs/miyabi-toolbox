@@ -100,6 +100,40 @@ class SubmitTests(FakePbsCase):
         self.assertTrue(again["idempotent"])
 
 
+class NamingAndCodeTests(FakePbsCase):
+    def test_default_name_comes_from_client_ref(self):
+        result = self.submit(name=None, client_ref="ATT-0009-1")
+        self.assertEqual(self.job(result["job_id"])["name"], "ATT-0009-1")
+
+    def test_code_mutability_is_a_warning_only_for_recorded_runs(self):
+        base = {"script": str(self.script), "queue": "debug-g", "walltime": "00:10:00"}
+
+        def status(**extra):
+            plan = self.ok_call("job_submit", {**base, **extra})
+            return next(c for c in plan["checks"] if c["id"] == "code.mutable")
+
+        self.assertEqual(status()["status"], "pass")
+        warned = status(client_ref="ATT-1")
+        self.assertEqual(warned["status"], "warn")
+        self.assertIn("read-only snapshot", warned["detail"])
+        snapshot = self.project / "snapshots" / "abc"
+        snapshot.mkdir(parents=True)
+        (snapshot / "job.pbs").write_text(self.script.read_text())
+        snapshot.chmod(0o555)
+        self.addCleanup(snapshot.chmod, 0o755)
+        frozen = status(client_ref="ATT-1", script=str(snapshot / "job.pbs"), workdir=str(snapshot))
+        self.assertEqual(frozen["status"], "pass")
+        self.assertIn("read-only", frozen["detail"])
+
+
+class SummaryTests(FakePbsCase):
+    def test_requested_is_summed_before_rounding(self):
+        for index in range(3):
+            self.submit(queue="debug-mig", walltime="00:08:00", name=f"m{index}")
+        summary = self.ok_call("ledger_query", {"format": "summary"})["summary"]
+        self.assertEqual(summary["requested"], {"mig_instance_hours": 0.4})
+
+
 class PolicyTests(FakePbsCase):
     def write_policy(self, policy: dict) -> None:
         state = self.project / ".miyabi-mcp"

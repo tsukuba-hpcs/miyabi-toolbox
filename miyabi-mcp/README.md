@@ -138,5 +138,7 @@ The fake PBS replays anonymized output captured on miyabi-g1 (2026-10-30).
 Verified on Miyabi-G (2026-10-30): read-only queries against live PBS; the MCP server over `ssh -T`;
 submission with a project policy (debug-mig); cancelling held and running jobs; Exit_status of qdel on a
 running job (271) and of a walltime kill (−29); a background-command notification over ssh from a
-workstation; the MIG profile of debug-mig (`GH200 MIG 2g.24gb`). The notification daemon and groups are
-covered by offline tests; herdr, tmux and codex_queue delivery and Miyabi-C have not been run live.
+workstation; the MIG profile of debug-mig (`GH200 MIG 2g.24gb`); the notification daemon on a workstation
+over real ssh; and, in smooth-research's end-to-end test, a group of three jobs notified once through the
+listener, acknowledged and exported into `rl run record`. herdr, tmux and codex_queue delivery and Miyabi-C
+have not been run live.

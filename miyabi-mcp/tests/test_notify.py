@@ -56,6 +56,9 @@ class GroupTests(NotifyCase):
         self.assertEqual(state["status"], "delivered")
         token = message["message"].split('ack_token="')[1].split('"')[0]
         self.assertEqual(self.ok_call("notify_ack", {"id": state["id"], "ack_token": token})["status"], "acknowledged")
+        daemons = self.ok_call("notify_list")["daemons"]
+        self.assertEqual([d["notifier"] for d in daemons], ["testbox"])
+        self.assertTrue(daemons[0]["last_poll"])
 
     def test_unsealed_group_waits_for_seal(self):
         jobs = [self.submit(name=f"g{i}", notify={"name": "open-group", "notifier": "testbox"})["job_id"]

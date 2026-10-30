@@ -228,7 +228,10 @@ def build_plan(settings: Settings, store: Store, args: dict, policy: dict) -> tu
         caps.append(f"{requested} {unit} > {per_job[cap_key]}")
     checks.add("policy.per_job", "fail" if caps else "pass", "; ".join(caps) or f"{requested} {unit} requested")
     # -- name, workdir, output, env, labels
-    name = args.get("name") or re.sub(r"[^A-Za-z0-9_.+-]", "-", Path(script_source or "job").stem)
+    # Default job name: the client's reference (e.g. an attempt id), else the script's file name.
+    name = args.get("name") or re.sub(r"[^A-Za-z0-9_.+-]", "-", args.get("client_ref") or Path(script_source or "job").stem)
+    if not JOB_NAME.fullmatch(name) and not args.get("name"):
+        name = "j-" + name[:228]
     if not JOB_NAME.fullmatch(name):
         raise MiyabiError("invalid_arguments", "name must start with a letter and use letters, digits, _ . + -")
     workdir = Path(args.get("workdir") or store.project_dir)
@@ -262,9 +265,17 @@ def build_plan(settings: Settings, store: Store, args: dict, policy: dict) -> tu
         from .notify import check_spec
 
         checks.add("notify", *check_spec(store, args["notify"]))
-    writable = _code_paths_writable([workdir] + ([Path(script_source).parent] if script_source else []))
-    if writable:
-        checks.add("code.mutable", "warn", "code read at run time may change: writable " + ", ".join(writable))
+    writable = sorted(set(_code_paths_writable([workdir] + ([Path(script_source).parent] if script_source else []))))
+    recorded = bool(args.get("client_ref") or (args.get("labels") or {}).get("code_commit"))
+    if writable and recorded:
+        checks.add("code.mutable", "warn", "this run is tied to a recorded version, but the code it reads at run "
+                   "time can still change: writable " + ", ".join(writable) + ". Run from a read-only snapshot "
+                   "(e.g. git archive into <project>/snapshots/<commit>, chmod -R a-w) and set workdir to it")
+    elif writable:
+        checks.add("code.mutable", "pass", "code is read from writable directories (fine for development): "
+                   + ", ".join(writable))
+    else:
+        checks.add("code.mutable", "pass", "code is read from read-only directories")
     plan = {
         "project_dir": str(store.project_dir), "system": system,
         "script_source": script_source, "script_digest": digest_bytes(text.encode("utf-8")),
