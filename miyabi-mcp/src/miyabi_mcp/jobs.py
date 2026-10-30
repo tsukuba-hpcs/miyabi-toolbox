@@ -98,7 +98,7 @@ def _ledger_view(record: dict | None) -> dict | None:
         return None
     return {"submit_id": record.get("submit_id"), "labels": record.get("labels"), "client_ref": record.get("client_ref"),
             "state": record.get("state"), "usage": record.get("usage"), "verdict": record.get("verdict"),
-            "watches": record.get("watches"), "output": (record.get("submit") or {}).get("output")}
+            "notifications": record.get("notifications"), "output": (record.get("submit") or {}).get("output")}
 
 
 def job_list(settings: Settings, args: dict) -> dict:
@@ -278,7 +278,7 @@ def _adopt(settings: Settings, store: Store, job_id: str, args: dict) -> dict:
         "status": "adopted", "project_dir": str(store.project_dir), "system": None,
         "name": fields.get("Job_Name"), "labels": args.get("labels") or {}, "client_ref": args.get("client_ref"),
         "request_key": None, "seq": 0, "state": None, "usage": None, "cancel_requested": False, "notes": [],
-        "verdict": {"status": "unreviewed"}, "watches": [],
+        "verdict": {"status": "unreviewed"}, "notifications": [],
         "submit": {"queue": fields.get("queue"), "select": select, "units": units,
                    "unit": "mig_instance_hours" if mig else "node_hours", "walltime_s": walltime_s,
                    "submitted_at": pbs_time(fields.get("qtime")), "adopted_at": now_iso(),
@@ -383,7 +383,10 @@ def ledger_query(settings: Settings, args: dict) -> dict:
     if fmt == "events":
         return ok(project=str(store.project_dir), events=events, next_cursor=cursor)
     observations = [o for o in (export.observation(e) for e in events) if o]
-    result = ok(project=str(store.project_dir), observations=observations, next_cursor=cursor)
+    from .notify import export_command
+
+    result = ok(project=str(store.project_dir), observations=observations, next_cursor=cursor,
+                export_command=export_command(settings, store.project_dir))
     if args.get("include_token"):
         result["token_usages"] = [u for u in (export.token_usage(e) for e in events) if u]
     return result

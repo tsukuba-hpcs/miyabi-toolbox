@@ -27,9 +27,11 @@ miyabi-mcp operates Miyabi PBS for this project: queries, submission, cancellati
   Size walltime from measurements (about 1.5x); a user's limit is a cap, never the request.
 - FINISH and Exit_status=0 do not mean the application succeeded: check the outputs. A FINISH without
   a start time never ran.
-- Do not poll in a loop. For jobs of a few minutes use job_wait; for longer ones use watch_create, run
-  its command in the background (Claude Code: run_in_background=true) and end your turn. Work on other
-  things that do not depend on the jobs first. When woken, read the jobs with job_get, then watch_ack.
+- Do not poll in a loop. For jobs of a few minutes use job_wait. For longer ones submit with
+  notify={"name": ..., "expected": <jobs in the group>, "message": <what to do next>}: one notification
+  covers a group (e.g. all seeds). Then run the returned command on your own machine: Claude Code runs
+  daemon.listen_command with run_in_background=true; other agents run daemon.start_command. Keep working
+  on things that do not depend on the jobs. When notified, read the jobs with job_get, then notify_ack.
 - Cancel only jobs this project submitted (job_cancel dry run first).
 """
 

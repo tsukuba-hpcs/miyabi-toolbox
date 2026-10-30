@@ -6,7 +6,7 @@ import traceback
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from . import jobs, submit as submissions, watch
+from . import jobs, notify, submit as submissions
 from .config import Settings
 from .ledger import register_project
 from .util import MiyabiError, failure
@@ -36,27 +36,24 @@ class Tool:
     idempotent: bool = False
 
 
-DELIVER = {"type": "object", "description": "How to wake the agent. method: claude_background (default; run the "
-           "returned command in the background), codex_queue / codex_goal (thread, remote), herdr (agent, machine), "
-           "tmux (target), command (name from config.json), file (path inside the project).",
-           "properties": {"method": {"enum": ["claude_background", "codex_queue", "codex_goal", "herdr", "tmux",
-                                              "command", "file"]},
+DELIVER = {"type": "object", "description": "How the daemon on your machine delivers the notification. method: "
+           "listener (default; Claude Code runs daemon.listen_command in the background), herdr (agent, machine), "
+           "tmux (target), codex_queue (thread, remote), command (name configured on your machine), file (path).",
+           "properties": {"method": {"enum": ["listener", "herdr", "tmux", "codex_queue", "command", "file"]},
                           "thread": STR, "remote": STR, "codex": STR, "agent": STR, "machine": STR, "target": STR,
                           "name": STR, "path": STR},
            "required": ["method"], "additionalProperties": False}
-WATCH_PROPERTIES = {
-    "job_ids": {**STRS, "description": "Jobs in this project's ledger."},
+NOTIFY_PROPERTIES = {
+    "name": {**STR, "description": "Group name: jobs submitted with the same name join one notification."},
+    "expected": {"type": "integer", "minimum": 1,
+                 "description": "Number of jobs in the group; the group is sealed when it is reached."},
     "when": {"enum": ["all_ended", "any_ended", "started"], "description": "Default all_ended."},
-    "queue": {"type": "object", "description": 'Wait for a queue instead, e.g. {"queue": "debug-g", "state": "started"}.',
-              "properties": {"queue": STR, "state": {"enum": ["started"]}}, "required": ["queue"],
-              "additionalProperties": False},
-    "timeout": {"type": ["string", "number"], "description": "Fire anyway after this long: seconds, HH:MM:SS or e.g. 12h."},
+    "early_failure": {"type": "boolean", "description": "Also notify at once when a member fails (default true)."},
+    "timeout": {"type": ["string", "number"], "description": "Notify anyway after this long: seconds, HH:MM:SS or 12h."},
     "deliver": DELIVER,
     "message": {**STR, "description": "Your continuation: what to do next and which outputs to check."},
+    "notifier": {**STR, "description": "Name of the daemon that delivers (default: the server's --notifier)."},
     "labels": LABELS,
-    "poll_seconds": {"type": "integer", "minimum": 30, "maximum": 3600},
-    "start_waiter": {"type": "boolean", "description": "Start a detached waiter on the login node (default for "
-                                                      "every method except claude_background)."},
 }
 
 TOOLS = [
@@ -105,8 +102,8 @@ TOOLS = [
                  "expected_seconds": {"type": "number"}, "note": STR,
                  "dry_run": {"type": "boolean", "default": True}, "plan_digest": STR,
                  "resubmit": {"type": "boolean"}, "allow_placeholders": {"type": "boolean"},
-                 "watch": {"type": "object", "properties": {k: v for k, v in WATCH_PROPERTIES.items()
-                                                             if k != "job_ids"}, "additionalProperties": False}},
+                 "notify": {"type": "object", "properties": NOTIFY_PROPERTIES, "additionalProperties": False,
+                            "description": "Add this job to a notification (created on first use of its name)."}},
                 ("queue", "walltime")),
          submissions.submit, read_only=False),
     Tool("job_cancel", "Cancel jobs",
@@ -116,25 +113,33 @@ TOOLS = [
                  "targets_digest": STR, "allow_external": {"type": "boolean"}}),
          jobs.job_cancel, read_only=False, destructive=True),
     Tool("job_wait", "Wait briefly",
-         "Block up to ~45 s for jobs of a few minutes (all_ended, any_ended or started). For anything longer use "
-         "watch_create and end your turn instead of polling.",
+         "Block up to ~45 s for jobs of a few minutes (all_ended, any_ended or started). For anything longer "
+         "submit with notify instead of polling.",
          schema({"job_ids": {**STRS, "minItems": 1}, "when": {"enum": ["all_ended", "any_ended", "started"]},
                  "timeout_s": {"type": "number", "minimum": 1}}, ("job_ids",)),
-         watch.job_wait),
-    Tool("watch_create", "Arm a wake-up",
-         "Wake an agent when jobs end or start, when a queue reopens, or at a timeout. For Claude Code, run the "
-         "returned command with run_in_background=true and end your turn; its exit carries the wake-up message. "
-         "Other methods start a detached waiter on the login node.",
-         schema(WATCH_PROPERTIES), watch.create, read_only=False),
-    Tool("watch_list", "List wake-ups",
-         "Watches of this project with their status, waiter heartbeat (waiter_alive) and, for a lost waiter, the "
-         "command that resumes it.", schema({"status": STRS}), watch.watch_list),
-    Tool("watch_cancel", "Cancel a wake-up", "Cancel an armed or fired watch (a delivery cannot be retracted).",
-         schema({"watch_id": STR, "reason": STR}, ("watch_id",)), watch.watch_cancel, read_only=False),
-    Tool("watch_ack", "Acknowledge a wake-up",
-         "Acknowledge a delivered wake-up with the ack_token from its message: it records that you resumed.",
-         schema({"watch_id": STR, "ack_token": STR}, ("watch_id", "ack_token")), watch.watch_ack,
-         read_only=False, idempotent=True),
+         notify.job_wait),
+    Tool("notify_create", "Create a notification",
+         "Notify you when jobs end or start, when a queue reopens, or after a timeout. job_ids seals the group at "
+         "once; a name with expected is filled by job_submit(notify=...). Delivery runs on your machine: run "
+         "daemon.listen_command (Claude Code, in the background) or daemon.start_command (others).",
+         schema({**NOTIFY_PROPERTIES, "job_ids": {**STRS, "description": "Jobs in this project's ledger."},
+                 "queue": {"type": "object", "description": 'e.g. {"queue": "debug-g", "state": "started"}.',
+                           "properties": {"queue": STR, "state": {"enum": ["started"]}}, "required": ["queue"],
+                           "additionalProperties": False}}),
+         notify.create, read_only=False),
+    Tool("notify_update", "Add jobs to or seal a notification",
+         "Add ledger jobs to an open notification, seal it (only sealed groups fire on all_ended), or change its "
+         "message. Identify it by id or name.",
+         schema({"id": STR, "name": STR, "add_job_ids": STRS, "seal": {"type": "boolean"}, "message": STR}),
+         notify.update, read_only=False),
+    Tool("notify_list", "List notifications",
+         "This project's notifications: status, sealing, members, pending messages, and whether the delivering "
+         "daemon has polled recently (with the command that starts it).", schema({"status": STRS}), notify.list_),
+    Tool("notify_cancel", "Cancel a notification", "Cancel an open notification (a delivery cannot be retracted).",
+         schema({"id": STR, "reason": STR}, ("id",)), notify.cancel, read_only=False),
+    Tool("notify_ack", "Acknowledge a notification",
+         "Acknowledge a delivered notification with the ack_token from its message.",
+         schema({"id": STR, "ack_token": STR}, ("id", "ack_token")), notify.ack, read_only=False, idempotent=True),
     Tool("ledger_query", "Query the job ledger",
          "This project's ledger: records, a summary (counts, requested and used node·h or MIG instance·h), raw "
          "events, or smooth-research observations (format=smooth-research; byte-stable, resumable with cursor).",

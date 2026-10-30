@@ -257,7 +257,11 @@ def build_plan(settings: Settings, store: Store, args: dict, policy: dict) -> tu
     if not isinstance(labels, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in labels.items()):
         raise MiyabiError("invalid_arguments", "labels must map names to string values")
     if args.get("depend"):
-        checks.add("depend", "warn", "afterok chains break when a parent fails; prefer a watch")
+        checks.add("depend", "warn", "afterok chains break when a parent fails; prefer a notification group")
+    if args.get("notify") is not None:
+        from .notify import check_spec
+
+        checks.add("notify", *check_spec(store, args["notify"]))
     writable = _code_paths_writable([workdir] + ([Path(script_source).parent] if script_source else []))
     if writable:
         checks.add("code.mutable", "warn", "code read at run time may change: writable " + ", ".join(writable))
@@ -462,7 +466,7 @@ def submit(settings: Settings, args: dict) -> dict:
             "status": "submitting", "project_dir": plan["project_dir"], "system": plan["system"],
             "name": plan["name"], "labels": plan["labels"], "client_ref": plan.get("client_ref"),
             "request_key": key, "seq": 0, "state": None, "usage": None, "cancel_requested": False, "notes": [],
-            "verdict": {"status": "unreviewed"}, "watches": [],
+            "verdict": {"status": "unreviewed"}, "notifications": [],
             "submit": {**{k: plan[k] for k in ("queue", "route", "group", "select", "units", "unit", "walltime",
                                                  "walltime_s", "requested_unit_hours", "workdir", "join", "depend",
                                                  "array", "plan_digest", "expected_seconds", "note",
@@ -496,12 +500,17 @@ def submit(settings: Settings, args: dict) -> dict:
             return _uncertain(settings, store, record, f"unparsable qsub output: {result.stdout[-500:]!r}")
         _bind(settings, store, record, job_id)
     events = _first_event(settings, store, job_id)
-    response = ok(job_id=job_id, submit_id=submit_id, record=store.locator(job_id), output=output,
-                  events=events, checks=checks + live)
-    if args.get("watch"):
-        from .watch import create as create_watch
+    from .notify import export_command
 
-        response["watch"] = create_watch(settings, {**args["watch"], "job_ids": [job_id]})
+    response = ok(job_id=job_id, submit_id=submit_id, record=store.locator(job_id), output=output,
+                  events=events, checks=checks + live, export_command=export_command(settings, store.project_dir))
+    if args.get("notify"):
+        from .notify import join
+
+        try:
+            response["notify"] = join(settings, store, args["notify"], job_id)
+        except MiyabiError as exc:  # the job exists: report the notification problem, do not hide the job
+            response["notify_error"] = exc.to_dict()
     return response
 
 

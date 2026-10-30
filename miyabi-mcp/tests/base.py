@@ -21,7 +21,8 @@ from miyabi_mcp import config, tools  # noqa: E402
 
 
 class FakePbsCase(unittest.TestCase):
-    user_config: dict = {"submit_grace_s": 0, "missing_s": 0, "poll_seconds": 1, "interactive_max_age_s": 0}
+    user_config: dict = {"submit_grace_s": 0, "missing_s": 0, "poll_seconds": 1, "interactive_max_age_s": 0,
+                         "poll_max_age_s": 0}
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()

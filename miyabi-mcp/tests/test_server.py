@@ -30,7 +30,7 @@ class ServerTests(FakePbsCase):
             plan = await session.call_tool("job_submit", {"script": str(self.script), "queue": "debug-g",
                                                           "walltime": "00:10:00"})
             bad = await session.call_tool("job_get", {"job_ids": ["1"], "bogus": True})
-            missing = await session.call_tool("watch_ack", {"watch_id": "W-x", "ack_token": "t"})
+            missing = await session.call_tool("notify_ack", {"id": "N-x", "ack_token": "t"})
             return init, listed, context, plan, bad, missing
 
         init, listed, context, plan, bad, missing = self.run_session(body)
@@ -38,7 +38,7 @@ class ServerTests(FakePbsCase):
         self.assertIn("job_submit (dry run)", init.instructions)
         names = {tool.name for tool in listed.tools}
         self.assertEqual(names, {"pbs_context", "pbs_queues", "job_list", "job_get", "job_submit", "job_cancel",
-                                 "job_wait", "watch_create", "watch_list", "watch_cancel", "watch_ack",
+                                 "job_wait", "notify_create", "notify_update", "notify_list", "notify_cancel", "notify_ack",
                                  "ledger_query", "job_annotate"})
         cancel = next(tool for tool in listed.tools if tool.name == "job_cancel")
         self.assertTrue(cancel.annotations.destructiveHint)

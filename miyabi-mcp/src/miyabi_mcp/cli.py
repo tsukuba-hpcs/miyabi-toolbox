@@ -1,7 +1,8 @@
-"""Command line: the same tools as the MCP server, plus serve, wait and init (DESIGN.md 6.3).
+"""Command line: the same tools as the MCP server, plus serve, init, notify and notifyd (DESIGN.md 6.3, 9).
 
 Every tool runs through `miyabi-mcp call <tool> '<json arguments>'` and prints one JSON document;
-exit 0 when ok, 1 on a reported failure, 2 on bad arguments.
+exit 0 when ok, 1 on a reported failure, 2 on bad arguments. `notifyd` and `notify listen` run on the
+agent's machine, which need not be a Miyabi node.
 """
 
 from __future__ import annotations
@@ -9,14 +10,11 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from . import __version__, config, tools
 from .util import MiyabiError, canonical, compact, failure, ok
-
-
-def _settings(args: argparse.Namespace) -> config.Settings:
-    return config.load(project_dir=args.project_dir, project=args.project, group=args.group)
 
 
 def _emit(result: dict, pretty: bool) -> int:
@@ -37,52 +35,109 @@ def _arguments(text: str | None) -> dict:
     return value
 
 
-def main(argv: list[str] | None = None) -> int:
+def _daemon_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--notifier", help="daemon name (default: this machine's short hostname)")
+    parser.add_argument("--remote", help="ssh alias of the Miyabi login node; omit when running on it")
+    parser.add_argument("--remote-launcher", help="bin/miyabi-mcp on the login node")
+    parser.add_argument("--poll-seconds", type=int, default=300)
+    parser.add_argument("--idle-polls", type=int, default=2)
+    parser.add_argument("--fail-notify-after", type=int, default=3)
+
+
+def _options(args: argparse.Namespace):
+    from .notifyd import Options, short_host
+
+    return Options(notifier=args.notifier or short_host(), remote=args.remote, remote_launcher=args.remote_launcher,
+                   poll_seconds=args.poll_seconds, idle_polls=args.idle_polls, fail_notify_after=args.fail_notify_after)
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="miyabi-mcp", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--version", action="version", version=f"miyabi-mcp {__version__}")
-    for target, default in ((parser, None), (common := argparse.ArgumentParser(add_help=False), argparse.SUPPRESS)):
+    common = argparse.ArgumentParser(add_help=False)
+    for target, default in ((parser, None), (common, argparse.SUPPRESS)):
         target.add_argument("--project", default=default, help="project name under /work/<group>/<user>/")
         target.add_argument("--project-dir", default=default, help="absolute project directory")
         target.add_argument("--group", default=default, help="PBS group (default: your only /work/<group>/<user>)")
         target.add_argument("--pretty", action="store_true", default=False if default is None else default,
                             help="indent JSON output")
     sub = parser.add_subparsers(dest="command", required=True)
-    add_parser = sub.add_parser
-    sub.add_parser = lambda *a, **k: add_parser(*a, parents=[common], **k)  # options before or after the command
-    sub.add_parser("serve", help="run the MCP server on stdio")
-    wait = sub.add_parser("wait", help="run a watch's waiter until it delivers (see watch_create)")
-    wait.add_argument("--watch", required=True)
-    init = sub.add_parser("init", help="create <project>/.miyabi-mcp/, optionally installing a policy file")
+
+    def add(name: str, **kwargs) -> argparse.ArgumentParser:
+        return sub.add_parser(name, parents=[common], **kwargs)  # options before or after the command
+
+    serve = add("serve", help="run the MCP server on stdio (on a Miyabi login node)")
+    serve.add_argument("--notifier", help="default daemon name for notifications (the agent's machine)")
+    serve.add_argument("--local-launcher", help="bin/miyabi-mcp on the agent's machine, for returned commands")
+    serve.add_argument("--remote-alias", help="ssh alias of this login node as seen from the agent's machine")
+    init = add("init", help="create <project>/.miyabi-mcp/, optionally installing a policy file")
     init.add_argument("--policy", help="JSON policy file to validate and install as the project policy")
-    sub.add_parser("tools", help="list the tools and their input schemas")
-    call = sub.add_parser("call", help="run one tool")
+    add("tools", help="list the tools and their input schemas")
+    call = add("call", help="run one tool")
     call.add_argument("tool", choices=sorted(tools.BY_NAME))
     call.add_argument("arguments", nargs="?", help="JSON object, @file or - for stdin")
-    sub.add_parser("context", help="= call pbs_context")
-    sub.add_parser("queues", help="= call pbs_queues")
-    sub.add_parser("jobs", help="= call job_list")
-    job = sub.add_parser("job", help="= call job_get")
+    add("context", help="= call pbs_context")
+    add("queues", help="= call pbs_queues")
+    add("jobs", help="= call job_list")
+    job = add("job", help="= call job_get")
     job.add_argument("job_ids", nargs="+")
     job.add_argument("--tail", type=int, default=0)
-    ledger = sub.add_parser("ledger", help="= call ledger_query")
+    ledger = add("ledger", help="= call ledger_query")
     ledger.add_argument("--format", default="records", choices=["records", "summary", "events", "smooth-research"])
     ledger.add_argument("--cursor")
     ledger.add_argument("--jsonl", action="store_true", help="smooth-research: one canonical observation per line")
+    notify = add("notify", help="notification plumbing: poll and report (login node), listen (agent's machine)")
+    notify_sub = notify.add_subparsers(dest="action", required=True)
+    poll = notify_sub.add_parser("poll", parents=[common], help="messages due for a notifier (used by notifyd)")
+    poll.add_argument("--notifier", required=True)
+    poll.add_argument("--caller")
+    report = notify_sub.add_parser("report", parents=[common], help="record a delivery attempt (used by notifyd)")
+    report.add_argument("--msg", required=True)
+    report.add_argument("--outcome", required=True, help="JSON outcome, e.g. {\"status\": \"delivered\"}")
+    listen = notify_sub.add_parser("listen", parents=[common],
+                                   help="wait for one notification on this machine (Claude Code background command)")
+    listen.add_argument("--id", required=True)
+    _daemon_options(listen)
+    notifyd = add("notifyd", help="the notification daemon on the agent's machine")
+    notifyd.add_argument("action", choices=["ensure", "run", "status", "stop"])
+    _daemon_options(notifyd)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:
         return int(exc.code or 0)
     try:
-        settings = _settings(args)
+        # Commands that run on the agent's machine: no Miyabi settings needed.
+        if args.command == "notifyd":
+            from . import notifyd
+
+            options = _options(args)
+            if args.action == "run":
+                return notifyd.run(options)
+            return _emit({"ensure": notifyd.ensure, "status": notifyd.status, "stop": notifyd.stop}[args.action](options),
+                         args.pretty)
+        if args.command == "notify" and args.action == "listen":
+            from .notifyd import listen
+
+            return listen(args.id, _options(args))
+        settings = config.load(project_dir=args.project_dir, project=args.project, group=args.group)
         if args.command == "serve":
             from .server import serve
 
-            return serve(settings)
-        if args.command == "wait":
-            from .watch import run_waiter
+            overrides = {key: value for key, value in (("notifier", args.notifier), ("local_launcher", args.local_launcher),
+                                                      ("remote_alias", args.remote_alias)) if value}
+            return serve(replace(settings, config={**settings.config, **overrides}))
+        if args.command == "notify":
+            from . import notify
 
-            return run_waiter(settings, args.watch)
+            if args.action == "poll":
+                return _emit(notify.poll(settings, args.notifier, args.caller), args.pretty)
+            return _emit(notify.report(settings, args.msg, json.loads(args.outcome)), args.pretty)
         if args.command == "init":
             return _emit(_init(settings, args.policy), args.pretty)
         if args.command == "tools":
@@ -91,19 +146,14 @@ def main(argv: list[str] | None = None) -> int:
                          args.pretty)
         if args.command == "call":
             return _emit(tools.run(args.tool, settings, _arguments(args.arguments)), args.pretty)
-        if args.command == "context":
-            return _emit(tools.run("pbs_context", settings, {}), args.pretty)
-        if args.command == "queues":
-            return _emit(tools.run("pbs_queues", settings, {}), args.pretty)
-        if args.command == "jobs":
-            return _emit(tools.run("job_list", settings, {}), args.pretty)
+        shortcuts = {"context": ("pbs_context", {}), "queues": ("pbs_queues", {}), "jobs": ("job_list", {})}
+        if args.command in shortcuts:
+            name, arguments = shortcuts[args.command]
+            return _emit(tools.run(name, settings, arguments), args.pretty)
         if args.command == "job":
-            return _emit(tools.run("job_get", settings, {"job_ids": args.job_ids, "tail_lines": args.tail}),
-                         args.pretty)
+            return _emit(tools.run("job_get", settings, {"job_ids": args.job_ids, "tail_lines": args.tail}), args.pretty)
         if args.command == "ledger":
-            query = {"format": args.format}
-            if args.cursor:
-                query["cursor"] = args.cursor
+            query = {"format": args.format, **({"cursor": args.cursor} if args.cursor else {})}
             result = tools.run("ledger_query", settings, query)
             if args.jsonl and result.get("ok") and args.format == "smooth-research":
                 for item in result["observations"]:
@@ -114,7 +164,8 @@ def main(argv: list[str] | None = None) -> int:
     except MiyabiError as exc:
         return _emit(failure(exc), args.pretty)
     except json.JSONDecodeError as exc:
-        return _emit(failure(MiyabiError("invalid_arguments", f"arguments are not JSON: {exc}")), args.pretty) and 2
+        _emit(failure(MiyabiError("invalid_arguments", f"arguments are not JSON: {exc}")), args.pretty)
+        return 2
     return 2
 
 
