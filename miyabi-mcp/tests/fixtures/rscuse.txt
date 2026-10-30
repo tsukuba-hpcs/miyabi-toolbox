@@ -1,0 +1,21 @@
+SYSTEM: Miyabi-G
+QUEUE                                                Ratio Used/Total(Node)
+debug-g/interact-g            *****************---     88%      42/  48
+short-g                       ****************----     83%      20/  24
+regular-g                     *******************-     98%    1000/1024
+
+QUEUE                                                Ratio Used/Total(MIG)
+debug-mig/interact-mig        *****---------------     25%      12/  48
+short-mig                     ************--------     62%      10/  16
+regular-mig                   ********************    100%      32/  32
+
+SYSTEM: Miyabi-C
+QUEUE                                                Ratio Used/Total(Node)
+debug-c/interact-c            ***-----------------     19%       3/  16
+short-c                       ******--------------     33%       2/   6
+regular-c                     *******************-     98%     165/ 168
+
+SYSTEM: Prepost
+QUEUE                                                Ratio Used/Total(Node)
+prepost                       --------------------      0%       0/   3
+

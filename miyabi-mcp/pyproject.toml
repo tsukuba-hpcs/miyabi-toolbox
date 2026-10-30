@@ -1,0 +1,11 @@
+[project]
+name = "miyabi-mcp"
+version = "0.1.0"
+description = "MCP server and CLI for Miyabi PBS: queries, submission, cancellation, a per-project job ledger and agent wake-ups"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["mcp>=1.12,<2"]
+
+[tool.uv]
+# Only the dependencies are installed into .venv; bin/miyabi-mcp puts src/ on sys.path.
+package = false

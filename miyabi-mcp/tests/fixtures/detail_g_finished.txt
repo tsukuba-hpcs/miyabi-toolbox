@@ -1,0 +1,86 @@
+Miyabi scheduled stop time: 2026/11/25(Wed) 09:00:00 (Remain: 25days 15:03:18)
+
+Job Id: 3731052.opbs
+    Job_Name = job-g
+    Job_Owner = utest@miyabi-g2
+    resources_used.abnormal_nodes = none
+    resources_used.cpupercent = 113
+    resources_used.cput = 00:11:22
+    resources_used.gpu_avg_power_per_nodes = '{"mg0804": "161.0"}'
+    resources_used.gpu_avg_util_per_nodes = '{"mg0804": "22.0"}'
+    resources_used.gpu_max_memory_per_nodes = '{"mg0804": "3420454912"}'
+    resources_used.gpu_max_power_per_nodes = '{"mg0804": "205.8"}'
+    resources_used.gpu_max_util_per_nodes = '{"mg0804": "40.0"}'
+    resources_used.mem = 7987712kb
+    resources_used.mem_per_nodes = '{"mg0804": "7881856kb"}'
+    resources_used.ncpus = 72
+    resources_used.vmem = 7987712kb
+    resources_used.walltime = 00:10:17
+    job_state = F
+    queue = small-g
+    server = opbs
+    Checkpoint = u
+    ctime = Fri Oct 30 05:22:05 2026
+    Error_Path = miyabi-g2:/work/gtest/utest/proj/logs/pbs/job-g.e3731052
+    exec_host = mg0804/0*72
+    exec_vnode = (mg0804:mem=104857600kb:ncpus=72:ngpus=1:nvnodes-g=1)
+    group_list = gtest
+    Hold_Types = n
+    Join_Path = oe
+    Keep_Files = oed
+    Mail_Points = ae
+    mtime = Fri Oct 30 05:52:49 2026
+    Output_Path = miyabi-g2:/work/gtest/utest/proj/logs/pbs/job-g-20261030-0522
+	05-2428102.log.pbs
+    Priority = 0
+    qtime = Fri Oct 30 05:22:05 2026
+    Rerunable = False
+    Resource_List.mem = 100gb
+    Resource_List.mpiprocs = 1
+    Resource_List.ncpus = 72
+    Resource_List.ngpus = 1
+    Resource_List.nodect = 1
+    Resource_List.place = free
+    Resource_List.select = 1:mpiprocs=1
+    Resource_List.walltime = 00:50:00
+    stime = Fri Oct 30 05:42:26 2026
+    obittime = Fri Oct 30 05:52:49 2026
+    session_id = 184151
+    jobdir = /home/utest
+    substate = 92
+    Variable_List = PBS_O_HOME=/home/utest,PBS_O_LANG=en_US.UTF-8,PBS_O_LOGNAME
+	=utest,PBS_O_PATH=/work/gtest/utest/.tool/packages/standalone/releases/0.163.0
+	-aarch64-unknown-linux-musl/tool-path:/home/utest/.tool/tmp/arg0-linux/tool-ar
+	g0VMvIdo:/work/gtest/utest/.tool/packages/standalone/releases/0.163.0-aarch64-
+	unknown-linux-musl/tool-path:/work/gtest/utest/rust_home/.cargo/bin:/home/utes
+	t/.nvm/versions/node/v24.19.0/bin:/home/utest/.local/bin:/home/utest/bin:/work
+	/opt/local/aarch64/cores/nvidia/25.9/Linux_aarch64/25.9/comm_libs/hpcx/bin:/wo
+	rk/opt/local/aarch64/cores/nvidia/25.9/Linux_aarch64/25.9/compilers/extras/qd/
+	bin:/work/opt/local/aarch64/cores/nvidia/25.9/Linux_aarch64/25.9/compilers/bin
+	:/work/opt/local/aarch64/cores/nvidia/25.9/Linux_aarch64/25.9/cuda/bin:/usr/sh
+	are/Modules/bin:/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin:/opt/pbs/bin
+	:/opt/pbs/bin:/opt/pbs/bin,PBS_O_MAIL=/var/spool/mail/utest,PBS_O_SHELL=/bin/b
+	ash,PBS_O_INTERACTIVE_AUTH_METHOD=resvport,PBS_O_HOST=miyabi-g2,PBS_O_WORKDIR=
+	/work/gtest/utest/proj/logs/pbs,PBS_O_SYSTEM=Linux,SPEC=/work/gtest/utest/proj
+	/logs/pbs/specs/job-g-20261030-052205-2428102.json,PBS_MAIL_EVENTS=a,PBS_O_QUE
+	UE=small-g,PBS_JOB_CORE_LIMIT=0,CALC_TMPDIR=/tmp/3731052.6484,LOCALDIR=/local/
+	3731052.6484
+    comment = Job run at Fri Oct 30 at 05:42 on (mg0804:mem=104857600kb:ncpus=7
+	2:ngpus=1:nvnodes-g=1) and finished
+    etime = Fri Oct 30 05:22:05 2026
+    run_count = 1
+    eligible_time = 00:20:25
+    Stageout_status = 1
+    Exit_status = 0
+    Submit_arguments = -q regular-g -W group_list=gtest -l select=1:mpiprocs=1 
+	-l walltime=00:50:00 -N job-g -j oe -o /work/gtest/utest/proj/logs/pbs/job-g-2
+	0261030-052205-2428102.log.pbs -v SPEC=/work/gtest/utest/proj/logs/pbs/specs/j
+	ob-g-20261030-052205-2428102.json /work/gtest/utest/proj/scripts/pbs/job.pbs
+    estimated.exec_vnode = (mg0895:mem=104857600kb:ncpus=72:ngpus=1:nvnodes-g=1
+	)
+    estimated.start_time = Fri Oct 30 06:55:42 2026
+    history_timestamp = 1793307169
+    project = _pbs_project_default
+    Submit_Host = miyabi-g2
+    TOKEN = 0.2
+

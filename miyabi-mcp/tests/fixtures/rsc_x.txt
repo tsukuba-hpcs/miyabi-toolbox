@@ -1,0 +1,36 @@
+SYSTEM: Miyabi-G
+QUEUE                     STATUS           MIN_NODE MAX_NODE MAX_ELAPSE REMAIN_ELAPSE MEM(GiB) PROJECT
+debug-g                   [ENABLE, START]         1       16   00:30:00      00:30:00      100 gtest
+short-g                   [ENABLE, START]         1        8   08:00:00      08:00:00      100 gtest
+regular-g
+  |-- small-g             [ENABLE, START]         1       16   48:00:00      48:00:00      100 gtest
+  |-- medium-g            [ENABLE, START]        17       64   48:00:00      48:00:00      100 gtest
+  |-- large-g             [ENABLE, START]        65      128   48:00:00      48:00:00      100 gtest
+  `-- x-large-g           [ENABLE, START]       129      256   24:00:00      24:00:00      100 gtest
+interact-g
+  |-- interact-g_n1       [ENABLE, START]         1        1   02:00:00      02:00:00      100 gtest
+  `-- interact-g_n8       [ENABLE, START]         2        8   00:10:00      00:10:00      100 gtest
+
+QUEUE                     STATUS           MIN_NODE MAX_NODE  AVAIL_MIG MAX_ELAPSE REMAIN_ELAPSE MEM(GiB) PROJECT
+debug-mig                 [ENABLE, START]         1        1      1,2,4   00:30:00      00:30:00       25 gtest
+short-mig                 [ENABLE, START]         1        1      1,2,4   08:00:00      08:00:00       25 gtest
+regular-mig               [ENABLE, START]         1        1      1,2,4   48:00:00      48:00:00       25 gtest
+interact-mig
+  `-- interact-mig_g1     [ENABLE, START]         1        1          1   02:00:00      02:00:00       25 gtest
+
+SYSTEM: Miyabi-C
+QUEUE                     STATUS           MIN_NODE MAX_NODE MAX_ELAPSE REMAIN_ELAPSE MEM(GiB) PROJECT
+debug-c                   [ENABLE, START]         1        4   00:30:00      00:30:00      118 gtest
+short-c                   [ENABLE, START]         1        2   08:00:00      08:00:00      118 gtest
+regular-c
+  |-- small-c             [ENABLE, START]         1       16   48:00:00      48:00:00      118 gtest
+  |-- medium-c            [ENABLE, START]        17       32   48:00:00      48:00:00      118 gtest
+  `-- large-c             [ENABLE, START]        33       64   24:00:00      24:00:00      118 gtest
+interact-c
+  |-- interact-c_n1       [ENABLE, START]         1        1   02:00:00      02:00:00      118 gtest
+  `-- interact-c_n2       [ENABLE, START]         2        2   00:10:00      00:10:00      118 gtest
+
+SYSTEM: Prepost
+QUEUE                     STATUS           MIN_NODE MAX_NODE MAX_ELAPSE REMAIN_ELAPSE MEM(GiB) PROJECT
+prepost                   [ENABLE, START]         1        1   06:00:00      06:00:00      240 gtest
+

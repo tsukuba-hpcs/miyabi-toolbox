@@ -1,0 +1,79 @@
+Miyabi scheduled stop time: 2026/11/25(Wed) 09:00:00 (Remain: 25days 15:03:18)
+
+Job Id: 3499506.opbs
+    Job_Name = job-mig
+    Job_Owner = utest@miyabi-g1
+    resources_used.abnormal_nodes = none
+    resources_used.cpupercent = 98
+    resources_used.cput = 00:04:32
+    resources_used.gpu_avg_power_per_nodes = '{"mg1098_mig1": "427.9"}'
+    resources_used.gpu_avg_util_per_nodes = '{"mg1098_mig1": "79.5"}'
+    resources_used.gpu_max_memory_per_nodes = '{"mg1098_mig1": "21241004032"}'
+    resources_used.gpu_max_power_per_nodes = '{"mg1098_mig1": "584.3"}'
+    resources_used.gpu_max_util_per_nodes = '{"mg1098_mig1": "93.2"}'
+    resources_used.mem = 6781056kb
+    resources_used.mem_per_nodes = '{"mg1098": "6781056kb"}'
+    resources_used.ncpus = 18
+    resources_used.vmem = 47456256kb
+    resources_used.walltime = 00:04:39
+    job_state = F
+    queue = debug-mig
+    server = opbs
+    Checkpoint = u
+    ctime = Wed Oct  7 17:12:23 2026
+    Error_Path = miyabi-g1:/work/gtest/utest/proj/job-mig.e3499506
+    exec_host = mg1098/0*18
+    exec_vnode = (mg1098:mem=26214400kb:ncpus=18:ngpus=1:nvnodes-mig=1)
+    group_list = gtest
+    Hold_Types = n
+    Join_Path = oe
+    Keep_Files = oed
+    Mail_Points = e
+    mtime = Wed Oct  7 17:21:33 2026
+    Output_Path = miyabi-g1:/work/gtest/utest/proj/logs/job-mig.log
+    Priority = 0
+    qtime = Wed Oct  7 17:12:24 2026
+    Rerunable = False
+    Resource_List.mem = 25gb
+    Resource_List.mpiprocs = 1
+    Resource_List.ncpus = 18
+    Resource_List.ngpus = 1
+    Resource_List.nodect = 1
+    Resource_List.place = pack
+    Resource_List.select = 1:mpiprocs=1
+    Resource_List.walltime = 00:25:00
+    stime = Wed Oct  7 17:16:49 2026
+    obittime = Wed Oct  7 17:21:33 2026
+    session_id = 1402489
+    jobdir = /home/utest
+    substate = 92
+    Variable_List = PBS_O_HOME=/home/utest,PBS_O_LANG=en_US.UTF-8,PBS_O_LOGNAME
+	=utest,PBS_O_PATH=/work/gtest/utest/pred-grad-pt/.venv/bin:/home/utest/.openco
+	de/bin:/home/utest/.nvm/versions/node/v24.19.0/bin:/home/utest/.opencode/bin:/
+	home/utest/.local/bin:/home/utest/bin:/work/opt/local/aarch64/cores/nvidia/25.
+	9/Linux_aarch64/25.9/comm_libs/hpcx/bin:/work/opt/local/aarch64/cores/nvidia/2
+	5.9/Linux_aarch64/25.9/compilers/extras/qd/bin:/work/opt/local/aarch64/cores/n
+	vidia/25.9/Linux_aarch64/25.9/compilers/bin:/work/opt/local/aarch64/cores/nvid
+	ia/25.9/Linux_aarch64/25.9/cuda/bin:/usr/share/Modules/bin:/usr/local/bin:/usr
+	/bin:/usr/local/sbin:/usr/sbin:/opt/pbs/bin:/opt/pbs/bin,PBS_O_MAIL=/var/spool
+	/mail/utest,PBS_O_SHELL=/bin/bash,PBS_O_INTERACTIVE_AUTH_METHOD=resvport,PBS_O
+	_HOST=miyabi-g1,PBS_O_WORKDIR=/work/gtest/utest/proj,PBS_O_SYSTEM=Linux,RUNS=r
+	uns/job-mig.txt,PBS_MAIL_EVENTS=n,PBS_O_QUEUE=debug-mig,PBS_JOB_CORE_LIMIT=0,C
+	ALC_TMPDIR=/tmp/3499506.8882,LOCALDIR=/local/3499506.8882
+    comment = Job run at Wed Oct 07 at 17:16 on (mg1098:mem=26214400kb:ncpus=18
+	:ngpus=1:nvnodes-mig=1) and finished
+    etime = Wed Oct  7 17:12:24 2026
+    run_count = 1
+    eligible_time = 00:00:01
+    Stageout_status = 1
+    Exit_status = 0
+    Submit_arguments = -q debug-mig -N job-mig -v RUNS=runs/job-mig.txt -l wall
+	time=00:25:00 -o logs/job-mig.log run_mig.pbs
+    estimated.exec_vnode = (mg1097:mem=26214400kb:ncpus=18:ngpus=1:nvnodes-mig=
+	1)
+    estimated.start_time = Wed Oct  7 17:37:33 2026
+    history_timestamp = 1791361293
+    project = _pbs_project_default
+    Submit_Host = miyabi-g1
+    TOKEN = 0.0
+

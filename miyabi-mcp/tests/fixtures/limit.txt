@@ -1,0 +1,8 @@
+SYSTEM: Miyabi-G
+PROJECT                            ACCEPT        RUN       NODE      MIG
+gtest                            0/128       0/16      0/256     0/24
+
+SYSTEM: Miyabi-C
+PROJECT                            ACCEPT        RUN       NODE
+gtest                              0/4        0/2       0/64
+

@@ -1,0 +1,85 @@
+"""The MCP stdio server, built on the official SDK's low-level Server (DESIGN.md 6.1).
+
+Tool work is synchronous (PBS commands, files) and runs in worker threads, so one slow call (job_wait)
+never blocks the others. Results carry structuredContent and the same JSON as compact text.
+"""
+
+from __future__ import annotations
+
+import threading
+
+import anyio
+import mcp.types as types
+from mcp.server.lowlevel import Server
+from mcp.server.stdio import stdio_server
+
+from . import __version__, tools
+from .config import Settings
+from .util import compact
+
+INSTRUCTIONS = """\
+miyabi-mcp operates Miyabi PBS for this project: queries, submission, cancellation, a job ledger in
+<project>/.miyabi-mcp/ and wake-ups. Rules:
+- Call pbs_context first. The server runs on a Miyabi login node: it never runs workloads; tests,
+  training and anything heavy run inside PBS jobs.
+- Submitting is two calls: job_submit (dry run) shows the checked plan; show it to the user when the
+  job is not clearly within their authorization, then call again with dry_run=false and the plan_digest.
+  Size walltime from measurements (about 1.5x); a user's limit is a cap, never the request.
+- FINISH and Exit_status=0 do not mean the application succeeded: check the outputs. A FINISH without
+  a start time never ran.
+- Do not poll in a loop. For jobs of a few minutes use job_wait; for longer ones use watch_create, run
+  its command in the background (Claude Code: run_in_background=true) and end your turn. Work on other
+  things that do not depend on the jobs first. When woken, read the jobs with job_get, then watch_ack.
+- Cancel only jobs this project submitted (job_cancel dry run first).
+"""
+
+
+def build(settings: Settings) -> Server:
+    server: Server = Server("miyabi-mcp", version=__version__, instructions=INSTRUCTIONS)
+
+    @server.list_tools()
+    async def list_tools() -> list[types.Tool]:
+        return [types.Tool(name=tool.name, title=tool.title, description=tool.description,
+                           inputSchema=tool.input_schema, outputSchema=tools.OUTPUT_SCHEMA,
+                           annotations=types.ToolAnnotations(title=tool.title, readOnlyHint=tool.read_only,
+                                                             destructiveHint=tool.destructive,
+                                                             idempotentHint=tool.idempotent, openWorldHint=True))
+                for tool in tools.TOOLS]
+
+    @server.call_tool()
+    async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
+        context = server.request_context
+        token = context.meta.progressToken if context.meta else None
+        session = context.session
+        stop = threading.Event()
+        hooks = {}
+        if name == "job_wait":
+            def progress(elapsed: float, total: float) -> None:
+                if token is not None:
+                    anyio.from_thread.run(session.send_progress_notification, token, elapsed, total,
+                                          "waiting for jobs")
+            hooks = {"cancelled": stop.is_set, "progress": progress}
+        actor = {"client": getattr(getattr(session, "client_params", None), "clientInfo", None)}
+        if name == "job_submit" and actor["client"] is not None:
+            arguments = {**(arguments or {}), "_actor": {"client": f"{actor['client'].name} {actor['client'].version}"}}
+        try:
+            result = await anyio.to_thread.run_sync(lambda: tools.run(name, settings, arguments, **hooks),
+                                                    abandon_on_cancel=True)
+        except anyio.get_cancelled_exc_class():
+            stop.set()
+            raise
+        return types.CallToolResult(content=[types.TextContent(type="text", text=compact(result))],
+                                    structuredContent=result, isError=not result.get("ok", False))
+
+    return server
+
+
+async def _main(settings: Settings) -> None:
+    server = build(settings)
+    async with stdio_server() as (read_stream, write_stream):
+        await server.run(read_stream, write_stream, server.create_initialization_options())
+
+
+def serve(settings: Settings) -> int:
+    anyio.run(_main, settings)
+    return 0

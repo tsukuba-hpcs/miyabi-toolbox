@@ -1,0 +1,14 @@
+# Local-only reference material (project-specific usage records)
+/no-git/
+
+# Python caches and test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Runtime state and logs
+*.log
+
+# uv-managed virtual environments (one per architecture on Miyabi)
+/.venv/
+/.venv-*/

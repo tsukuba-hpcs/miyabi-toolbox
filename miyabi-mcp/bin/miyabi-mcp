@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Run miyabi-mcp from this checkout's uv-managed virtual environment.
+# Nothing but the program's own output goes to stdout: MCP uses stdio.
+set -euo pipefail
+ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+PY="${MIYABI_MCP_PYTHON:-}"
+if [[ -z "$PY" ]]; then
+  for candidate in "$ROOT/.venv-$(uname -m)/bin/python" "$ROOT/.venv/bin/python"; do
+    if [[ -x "$candidate" ]]; then PY="$candidate"; break; fi
+  done
+fi
+if [[ -z "$PY" ]]; then
+  echo "miyabi-mcp: no virtual environment under $ROOT;" \
+       "run: cd $ROOT && uv sync --frozen --python /usr/bin/python3.11" >&2
+  exit 127
+fi
+# -I keeps PYTHONPATH, user site-packages and the caller's cwd out of the import path.
+exec "$PY" -I -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); from miyabi_mcp.cli import main; raise SystemExit(main())' \
+  "$ROOT/src" "$@"
