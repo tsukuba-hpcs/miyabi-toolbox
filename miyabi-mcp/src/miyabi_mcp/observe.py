@@ -23,11 +23,22 @@ def _age(snapshot: dict) -> float:
     return round(max(0.0, time.time() - float(snapshot.get("observed_ts", 0))), 1)
 
 
-def snapshot(settings: Settings, max_age: float, force: bool = False) -> dict:
-    """The user's unfinished jobs, at most `max_age` seconds old (one shared `qstat -ll`)."""
+def accepted_after(records) -> float:
+    """The latest qsub acceptance time among `records` (0 when none is known)."""
+    return max([float((r.get("submit") or {}).get("accepted_ts") or 0) for r in records] or [0.0])
+
+
+def snapshot(settings: Settings, max_age: float, force: bool = False, newer_than: float = 0.0) -> dict:
+    """The user's unfinished jobs, at most `max_age` seconds old (one shared `qstat -ll`).
+
+    A table read that started before `newer_than` (a qsub acceptance time) cannot show that job, so it
+    is refreshed instead of being taken as evidence that the job is gone.
+    """
     path = settings.user_dir / "cache" / "active.json"
     cached = read_json(path)
-    if cached and not force and max_age > 0 and time.time() - float(cached.get("observed_ts", 0)) <= max_age:
+    fresh_enough = cached is not None and float(cached.get("observed_ts", 0)) > newer_than
+    if cached and fresh_enough and not force and max_age > 0 \
+            and time.time() - float(cached.get("observed_ts", 0)) <= max_age:
         return {**cached, "cache_age_s": _age(cached)}
     lock = Lock(settings.user_dir / "locks" / "snapshot", lease=90, timeout=0)
     try:
@@ -37,7 +48,8 @@ def snapshot(settings: Settings, max_age: float, force: bool = False) -> dict:
         while time.monotonic() < deadline:
             time.sleep(0.5)
             fresh = read_json(path)
-            if fresh and (not cached or fresh.get("observed_ts") != cached.get("observed_ts")):
+            if fresh and (not cached or fresh.get("observed_ts") != cached.get("observed_ts")) \
+                    and float(fresh.get("observed_ts", 0)) > newer_than:
                 return {**fresh, "cache_age_s": _age(fresh)}
         lock = Lock(settings.user_dir / "locks" / "snapshot", lease=90, timeout=30).acquire()
     try:
@@ -155,6 +167,6 @@ def refresh_jobs(store: Store, job_ids: list[str], max_age: float) -> tuple[list
             raise MiyabiError("not_in_ledger", f"job {job_id} is not in this project's ledger; adopt it with "
                               "job_annotate(adopt=true) first")
         records.append(record)
-    snap = snapshot(store.settings, max_age)
+    snap = snapshot(store.settings, max_age, newer_than=accepted_after(records))
     refresh(store, records, snap)
     return [store.find(job_id) or {} for job_id in job_ids], snap

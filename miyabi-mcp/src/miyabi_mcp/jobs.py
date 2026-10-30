@@ -102,10 +102,12 @@ def _ledger_view(record: dict | None) -> dict | None:
 
 
 def job_list(settings: Settings, args: dict) -> dict:
-    snap = observe.snapshot(settings, max_age=settings.config["interactive_max_age_s"])
     store = _store(settings)
+    ledger_records = [r for r in store.records() if r.get("job_id")] if store else []
+    snap = observe.snapshot(settings, max_age=settings.config["interactive_max_age_s"],
+                            newer_than=observe.accepted_after(ledger_records))
     if store is not None and args.get("refresh_ledger", True):
-        observe.refresh(store, [r for r in store.records() if r.get("job_id")], snap)
+        observe.refresh(store, ledger_records, snap)
     jobs = []
     for row in snap["jobs"]:
         job = dict(row, finished=False)
@@ -154,10 +156,11 @@ def job_get(settings: Settings, args: dict) -> dict:
     if not ids or len(ids) > MAX_IDS:
         raise MiyabiError("invalid_arguments", f"give 1–{MAX_IDS} job_ids")
     tail = min(int(args.get("tail_lines") or 0), MAX_TAIL)
-    snap = observe.snapshot(settings, max_age=settings.config["interactive_max_age_s"])
     store = _store(settings)
+    records = [r for r in (store.find(i) for i in ids) if r] if store else []
+    snap = observe.snapshot(settings, max_age=settings.config["interactive_max_age_s"],
+                            newer_than=observe.accepted_after(records))
     if store is not None:
-        records = [r for r in (store.find(i) for i in ids) if r]
         if records:
             observe.refresh(store, records, snap)
     active = {job_num(row["job_id"]) for row in snap["jobs"]}
@@ -207,7 +210,8 @@ def job_cancel(settings: Settings, args: dict) -> dict:
         ids = [r["job_id"] for r in store.records() if r.get("job_id")
                and (r.get("state") or {}).get("execution_state") not in {"ended"}
                and all((r.get("labels") or {}).get(k) == v for k, v in selector.items())]
-    snap = observe.snapshot(settings, max_age=settings.config["interactive_max_age_s"])
+    snap = observe.snapshot(settings, max_age=settings.config["interactive_max_age_s"],
+                            newer_than=observe.accepted_after([r for r in (store.find(i) for i in ids) if r]))
     active = {job_num(row["job_id"]): row for row in snap["jobs"]}
     external_ok = bool(args.get("allow_external")) and policy.get("cancel_scope") == "any"
     targets = []
@@ -348,8 +352,10 @@ def ledger_query(settings: Settings, args: dict) -> dict:
     store = Store(settings)
     fmt = args.get("format", "records")
     if args.get("refresh", True):
-        snap = observe.snapshot(settings, max_age=settings.config["interactive_max_age_s"])
-        observe.refresh(store, [r for r in store.records() if r.get("job_id")], snap)
+        ledger_records = [r for r in store.records() if r.get("job_id")]
+        snap = observe.snapshot(settings, max_age=settings.config["interactive_max_age_s"],
+                                newer_than=observe.accepted_after(ledger_records))
+        observe.refresh(store, ledger_records, snap)
     records = [r for r in store.records() if _selected(r, args)]
     if fmt == "records":
         return ok(project=str(store.project_dir), count=len(records), records=records)
