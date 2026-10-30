@@ -60,11 +60,11 @@ def default_notifier(settings: Settings) -> str:
     return settings.config.get("notifier") or host()
 
 
-def export_command(settings: Settings, project_dir: Path | str) -> str:
+def export_command(settings: Settings, project_dir: Path | str, notifier: str | None = None) -> str:
     """A command for the agent's machine that prints this project's smooth-research JSONL (data never passes
-    through the model)."""
+    through the model). `notifier` names the agent's machine; on another machine the command goes over ssh."""
     local = f"{LAUNCHER} --project-dir {project_dir} ledger --format smooth-research --jsonl"
-    notifier = settings.config.get("notifier")
+    notifier = notifier or settings.config.get("notifier")
     if not notifier or notifier == host():
         return local
     return f"ssh -T -o BatchMode=yes {settings.config.get('remote_alias', 'miyabi-g')} {local}"
@@ -382,7 +382,8 @@ def _queue_message(store: Store, notification_id: str, kind: str, reason: str, s
         number = len(item["outbox"]) + 1
         item["outbox"].append({"msg_id": f"{item['id']}:{number}", "kind": kind, "created_at": now_iso(),
                                "message": render(item, reason, summary, kind,
-                                                 export_command(store.settings, store.project_dir)),
+                                                 export_command(store.settings, store.project_dir,
+                                                                item.get("notifier"))),
                                "status": "pending", "attempts": 0})
 
     _update(store, notification_id, change)

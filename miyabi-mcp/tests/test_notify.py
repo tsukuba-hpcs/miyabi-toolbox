@@ -142,8 +142,9 @@ class DaemonTests(NotifyCase):
 
     def test_remote_mode_through_ssh(self):
         fake_ssh = self.bin / "fake-ssh"
+        # Like ssh: drop options and the host, then let a shell parse the one remote command line.
         fake_ssh.write_text('#!/bin/sh\nwhile [ "${1#-}" != "$1" ]; do [ "$1" = "-o" ] && shift; shift; done\n'
-                            'shift\nexec "$@"\n')
+                            'shift\nexec sh -c "$*"\n')
         fake_ssh.chmod(0o755)
         os.environ["MIYABI_MCP_SSH"] = str(fake_ssh)
         self.addCleanup(os.environ.pop, "MIYABI_MCP_SSH", None)
@@ -155,7 +156,10 @@ class DaemonTests(NotifyCase):
         self.assertEqual(daemon.returncode, 0, daemon.stderr)
         line = json.loads(inbox.read_text().splitlines()[0])
         self.assertIn("all 1 jobs ended", line["message"])
+        self.assertIn("ssh -T -o BatchMode=yes miyabi-g ", line["message"])  # export_command for laptop
         self.assertEqual(self.ok_call("notify_list")["notifications"][0]["status"], "delivered")
+        state = json.loads(self.run_cli("notifyd", "status", "--notifier", "laptop").stdout)["state"]
+        self.assertEqual(state["failures"], 0)
 
     def test_broken_channel_is_announced(self):
         broken = self.bin / "broken-ssh"

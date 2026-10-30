@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import signal
 import socket
 import subprocess
@@ -73,7 +74,9 @@ def local_commands() -> dict:
 
 def _remote(opts: Options, args: list[str], timeout: float = 120) -> dict:
     ssh = os.environ.get("MIYABI_MCP_SSH", "ssh")
-    argv = [ssh, "-T", "-o", "BatchMode=yes", opts.remote, opts.remote_launcher or "miyabi-mcp", *args]
+    # ssh hands the remote shell one command line: quote every argument (JSON outcomes contain quotes).
+    command = shlex.join([opts.remote_launcher or "miyabi-mcp", *args])
+    argv = [ssh, "-T", "-o", "BatchMode=yes", opts.remote, command]
     try:
         process = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False,
                                  stdin=subprocess.DEVNULL)
