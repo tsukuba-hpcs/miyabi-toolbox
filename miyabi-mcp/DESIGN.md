@@ -38,7 +38,7 @@
 
 ### 1.3 非目标
 
-- 通用远程执行、文件读写、交互终端：这是 pi-env-mcp 的职责。交互分配（`qsub -I`）用 pi-env-mcp 的 `terminal_*` 或 tmux。
+- 通用远程执行、文件读写、交互终端：这是 pi-env-mcp 的职责。miyabi-mcp 用 `interactive_plan` 校验交互分配，CLI `interactive-start` 在 pi-env-mcp 的 PTY 内运行并记录 `qsub -I`；终端输入输出仍通过 `terminal_*`（见 8.3.1）。
 - 研究语义（RunSpec、attempt、结果是否有效）：这是 smooth-research 的职责。
 - 在登录节点上跑工作负载：服务不提供任意命令执行工具。
 - 实验专用的控制器逻辑（spec 展开、science version、选择与 TPE、统计）：留在 ml-experiment-platform skill 作为方法论。
@@ -486,6 +486,8 @@ miyabi-mcp/
 | `job_list` | 当前作业（可附带有界历史），合并台账中的标签；按状态、名称前缀、标签过滤；可投影字段或只给汇总 | readOnly | `jobs` |
 | `job_get` | 一个或多个作业的详情（解析 `-f`/`-H -f`）、台账记录、作业标记、可选的日志尾部 | readOnly | `job` |
 | `job_submit` | 默认 dry-run 生成计划；凭 `plan_digest` 提交；可同时加入通知（`notify`） | 写（消耗预算） | `submit` |
+| `interactive_plan` | 校验交互资源与策略，返回计划及 pi-env-mcp 终端启动参数；在 PTY 内执行后提交并记账 | 写（计划） | `call interactive_plan` → `interactive-start` |
+| `allocation_check` | 验证当前 shell 的计算节点与目标架构、nodefile 和实时 PBS 分配，报告剩余 walltime | readOnly | 在分配内 `call allocation_check` |
 | `job_cancel` | 默认 dry-run 列出目标；执行 qdel 并记录原因 | destructive | `cancel` |
 | `job_wait` | 有界等待（默认最长 45 s）多作业条件 | readOnly | `wait --jobs …` |
 | `notify_create`、`notify_update` | 为已提交的作业、队列或到期时间创建通知；加入作业、封口 | 写（台账） | `call notify_*` |
@@ -541,7 +543,7 @@ miyabi-mcp/
   - 输出路径必须是 /work 上的绝对路径：不能放在 `/tmp`（曾有作业从 `/tmp` 提交导致输出丢失）；放在 /home 下会报警（容量小）。
   - 父目录不存在时自动创建。
 - **环境变量**：变量名合法；值中的逗号和引号按 `qsub -v` 规则转义，无法安全转义时拒绝。
-- **依赖**：`depend` 允许，但会提醒（`afterok` 链曾经断过，建议改用通知的作业组）。`-I` 交互作业一律拒绝，改用 pi-env-mcp 的终端。
+- **依赖**：`depend` 允许，但会提醒（`afterok` 链曾经断过，建议改用通知的作业组）。交互分配走 `interactive_plan` + PTY 内的 `interactive-start`，不接受脚本、数组、依赖或批处理输出参数。
 - **重复**：`request_key` 已经使用过时直接返回原作业；有同名、同标签的活动作业时报警。
 - **代码可变性**：PBS 只在提交时复制脚本，脚本引用的代码要到运行时才读。
   - 这次运行声明了要绑定到一个版本（带 `client_ref` 或 `labels.code_commit`），而 `workdir` 或脚本所在目录仍可写时，给出 warn，并说明补救办法：从只读快照运行（例如 `git archive` 到 `<project>/snapshots/<commit>` 后 `chmod -R a-w`），把 `workdir` 设为它。
@@ -562,6 +564,30 @@ miyabi-mcp/
 **对账。** qsub 超时或输出无法解析时，记录标为 `submit_uncertain`。随后用 `qstat -f` 查看同名候选作业的 `Variable_List`，找到同一个 `MIYABI_SUBMIT_ID` 就绑定。找不到时报告不确定，必须由调用方显式传 `resubmit: true` 才会再次提交。
 
 **输出：** `job_id`、记录路径、输出日志路径、`observed_at`、`submitted` 事件，以及下一步提示（例如休眠的命令）。
+
+### 8.3.1 交互分配与执行平面检查
+
+`interactive_plan(queue, walltime, request_key, …)` 复用提交计划的实时队列、组、资源、停机时间和策略检查。
+队列为 `interact-g`、`interact-c` 或 `interact-mig` 的顶层名称；支持 `nodes/select`、`workdir`、`env`、标签和备注。
+只准备计划，不提交作业；返回 10 分钟有效的摘要、`launch_command`、pi-env-mcp `terminal_open` 参数和
+`allocation_check_command`。完整调用示例见 [README](README.md#interactive-compute-allocations)。
+
+调用方在登录节点的持久 PTY 中执行 `exec … interactive-start <plan_digest>`，保留 terminal_id。
+CLI 拒绝无 PTY 或非登录节点环境，重新检查计划与策略后以 argv 执行 `qsub -I`，用内部 PTY 转发同一个会话。
+解析到 PBS 接受的作业号后立即写普通台账及用户索引，释放提交锁，再持续转发输入输出。
+记录有 `submit.interactive=true`，输出路径是持久终端原始日志，不生成批处理脚本快照。
+同一 request_key 重试返回原作业，不重复申请；未知结果沿用 MIYABI_SUBMIT_ID 对账机制。
+
+`allocation_check(target_system, expected_job_id?)` 检查执行该命令的进程环境：计算节点角色、架构、有效作业号、
+nodefile 主机成员，再检查实时 PBS R 状态、作业所属用户、exec_host 和项目；不满足时返回 ok=false / CLI 非零。
+返回剩余 walltime（无法取得时为 null）。必须通过 `terminal_send` 在计算 shell 内调用返回的检查命令；
+登录节点上的 MCP 调用不能证明远端 PTY 已获分配。检查成功后才设置项目 cwd、模块和解释器并运行任务。
+
+等待时用 `terminal_read`；调度状态沿用 `job_get/job_wait`，长等待可注册 started 通知并维持终端连接。
+普通失败检查在子 shell 中执行，避免结束分配；保存 /work 输出、停止自有后台进程后 `exit`。
+qsub 退出后整个专用终端关闭，不退回登录 shell。排队和运行中的取消均沿用 `job_cancel` dry-run/commit，
+然后关闭终端。终端工具超时不取消作业；失联、进程或节点故障后必须核实 PBS，清理遗留作业，不能假定已释放。
+runner 对可捕获的断开信号尝试取消自己的作业；终端不支持重新附着。
 
 ### 8.4 `job_cancel`
 

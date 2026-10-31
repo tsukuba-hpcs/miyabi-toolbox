@@ -77,6 +77,8 @@ def build_parser() -> argparse.ArgumentParser:
     call = add("call", help="run one tool")
     call.add_argument("tool", choices=sorted(tools.BY_NAME))
     call.add_argument("arguments", nargs="?", help="JSON object, @file or - for stdin")
+    interactive = add("interactive-start", help="submit a saved interactive_plan and relay qsub -I (PTY required)")
+    interactive.add_argument("plan_digest")
     add("context", help="= call pbs_context")
     add("queues", help="= call pbs_queues")
     add("jobs", help="= call job_list")
@@ -126,6 +128,10 @@ def main(argv: list[str] | None = None) -> int:
 
             return listen(args.id, _options(args))
         settings = config.load(project_dir=args.project_dir, project=args.project, group=args.group)
+        if args.command == "interactive-start":
+            from .interactive import start
+
+            return start(settings, args.plan_digest)
         if args.command == "serve":
             from .server import serve
 

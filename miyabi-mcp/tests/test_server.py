@@ -39,7 +39,7 @@ class ServerTests(FakePbsCase):
         names = {tool.name for tool in listed.tools}
         self.assertEqual(names, {"pbs_context", "pbs_queues", "job_list", "job_get", "job_submit", "job_cancel",
                                  "job_wait", "notify_create", "notify_update", "notify_list", "notify_cancel", "notify_ack",
-                                 "ledger_query", "job_annotate"})
+                                 "ledger_query", "job_annotate", "interactive_plan", "allocation_check"})
         cancel = next(tool for tool in listed.tools if tool.name == "job_cancel")
         self.assertTrue(cancel.annotations.destructiveHint)
         self.assertTrue(next(t for t in listed.tools if t.name == "job_list").annotations.readOnlyHint)
@@ -49,6 +49,25 @@ class ServerTests(FakePbsCase):
         self.assertTrue(bad.isError)  # schema rejects unknown arguments
         self.assertTrue(missing.isError)
         self.assertEqual(missing.structuredContent["error"]["type"], "not_found")
+
+    def test_interactive_tools_over_mcp(self):
+        async def body(session, init):
+            plan = await session.call_tool("interactive_plan", {"queue": "interact-g", "walltime": "00:02:00",
+                                                                "request_key": "mcp-interactive"})
+            bad = await session.call_tool("interactive_plan", {"queue": "interact-g", "walltime": "00:02:00",
+                                                               "request_key": "mcp-interactive", "script": "x.pbs"})
+            guard = await session.call_tool("allocation_check", {"target_system": "Miyabi-G"})
+            return init, plan, bad, guard
+
+        init, plan, bad, guard = self.run_session(body)
+        self.assertIn("interactive_plan", init.instructions)
+        self.assertFalse(plan.isError)
+        self.assertTrue(plan.structuredContent["valid"])
+        self.assertIn("interactive-start", plan.structuredContent["launch_command"])
+        self.assertEqual(self.read_state()["jobs"], {})
+        self.assertTrue(bad.isError)
+        self.assertTrue(guard.isError)
+        self.assertEqual(guard.structuredContent["error"]["type"], "allocation_unconfirmed")
 
     def test_job_wait_reports_progress(self):
         job_id = self.submit()["job_id"]

@@ -32,7 +32,7 @@ PLAN_TTL_S = 600
 MAX_SCRIPT_BYTES = 1 << 20
 RESERVED_ENV = {"MIYABI_SUBMIT_ID", "MIYABI_CLIENT_REF", "MIYABI_PROJECT_DIR", "MIYABI_JOB_RECORD"}
 STABLE = ("project_dir", "script_digest", "script_source", "queue", "group", "select", "walltime", "name", "workdir",
-          "output", "join", "env", "depend", "array", "labels", "client_ref", "request_key")
+          "output", "join", "env", "depend", "array", "labels", "client_ref", "request_key", "interactive")
 
 
 class Checks(list):
@@ -134,7 +134,10 @@ def build_plan(settings: Settings, store: Store, args: dict, policy: dict) -> tu
     checks = Checks()
     extra: dict[str, Any] = {}
     # -- script
-    if bool(args.get("script")) == bool(args.get("script_text")):
+    interactive = bool(args.get("interactive"))
+    if interactive and any(args.get(k) is not None for k in ("script", "script_text", "array", "depend", "output", "join")):
+        raise MiyabiError("invalid_arguments", "interactive allocations do not take a script, array, depend, output or join")
+    if not interactive and bool(args.get("script")) == bool(args.get("script_text")):
         raise MiyabiError("invalid_arguments", "give exactly one of script (absolute path) or script_text")
     script_source = None
     if args.get("script"):
@@ -147,15 +150,18 @@ def build_plan(settings: Settings, store: Store, args: dict, policy: dict) -> tu
             raise MiyabiError("invalid_arguments", "script is larger than 1 MiB")
         text = path.read_text(encoding="utf-8", errors="replace")
         script_source = str(path)
-    else:
+    elif not interactive:
         text = args["script_text"]
         if len(text.encode()) > MAX_SCRIPT_BYTES:
             raise MiyabiError("invalid_arguments", "script_text is larger than 1 MiB")
+    else:
+        text = ""
     extra["script_text"] = text
-    syntax = subprocess.run([settings.command("bash"), "-n"], input=text, capture_output=True, text=True,
-                            timeout=10, check=False)
-    checks.add("script.syntax", "pass" if syntax.returncode == 0 else "fail",
-               "bash -n" if syntax.returncode == 0 else syntax.stderr.strip()[-500:])
+    if not interactive:
+        syntax = subprocess.run([settings.command("bash"), "-n"], input=text, capture_output=True, text=True,
+                                timeout=10, check=False)
+        checks.add("script.syntax", "pass" if syntax.returncode == 0 else "fail",
+                   "bash -n" if syntax.returncode == 0 else syntax.stderr.strip()[-500:])
     placeholders = sorted(set(PLACEHOLDER.findall(text)))
     if placeholders and not args.get("allow_placeholders"):
         checks.add("script.placeholders", "fail", "unfilled placeholders: " + ", ".join(placeholders[:10]))
@@ -175,9 +181,8 @@ def build_plan(settings: Settings, store: Store, args: dict, policy: dict) -> tu
     if not walltime_s:
         raise MiyabiError("invalid_arguments", "walltime must be HH:MM:SS and above zero")
     walltime = seconds_to_hms(walltime_s)
-    if args.get("interactive"):
-        raise MiyabiError("invalid_arguments", "interactive jobs need a terminal: use pi-env-mcp terminal_open "
-                          "and qsub -I there")
+    if interactive and queue not in {"interact-g", "interact-c", "interact-mig"}:
+        checks.add("queue.interactive", "fail", "use a top-level interact-g, interact-c or interact-mig queue")
     select = args.get("select") or f"{int(args.get('nodes', 1))}:mpiprocs=1"
     units = select_units(select)
     queue_data = observe.queues(settings)
@@ -277,7 +282,7 @@ def build_plan(settings: Settings, store: Store, args: dict, policy: dict) -> tu
     else:
         checks.add("code.mutable", "pass", "code is read from read-only directories")
     plan = {
-        "project_dir": str(store.project_dir), "system": system,
+        "project_dir": str(store.project_dir), "system": system, "interactive": interactive,
         "script_source": script_source, "script_digest": digest_bytes(text.encode("utf-8")),
         "directives": directives(text), "queue": queue, "route": route["name"] if route else None,
         "group": group, "select": select, "units": units, "unit": unit, "walltime": walltime,
@@ -337,7 +342,10 @@ def volatile_checks(settings: Settings, store: Store, plan: dict, policy: dict) 
 
 def build_argv(plan: dict, output: str, env: dict[str, str], script: Path) -> list[str]:
     argv = ["-q", plan["queue"], "-W", f"group_list={plan['group']}", "-l", f"select={plan['select']}",
-            "-l", f"walltime={plan['walltime']}", "-N", plan["name"], "-j", plan["join"], "-o", output]
+            "-l", f"walltime={plan['walltime']}", "-N", plan["name"]]
+    if plan.get("interactive"):
+        return ["-I", *argv, "-S", "/bin/bash", "-v", env_string(env)]
+    argv += ["-j", plan["join"], "-o", output]
     if plan.get("depend"):
         argv += ["-W", f"depend={plan['depend']}"]
     if plan.get("array"):
@@ -410,7 +418,9 @@ def _first_event(settings: Settings, store: Store, job_id: str) -> list[dict]:
     return [event for event in events if event]
 
 
-def submit(settings: Settings, args: dict) -> dict:
+def submit(settings: Settings, args: dict, *, interactive_qsub=None) -> dict:
+    if args.get("interactive") and not args.get("dry_run", True) and interactive_qsub is None:
+        raise MiyabiError("terminal_required", "use interactive_plan and run its launch_command in a persistent PTY")
     store = Store(settings)
     register_project(settings)
     policy = policies.load(settings)
@@ -420,7 +430,8 @@ def submit(settings: Settings, args: dict) -> dict:
             checks.extend(volatile_checks(settings, store, plan, policy))
         valid = not checks.failed
         if valid:
-            write_json(store.plan_path(plan["plan_digest"]), {"created_at": now_iso(), "plan": plan})
+            write_json(store.plan_path(plan["plan_digest"]), {"created_at": now_iso(), "plan": plan,
+                                                             "arguments": args if plan["interactive"] else None})
         preview = build_argv(plan, plan["output"] or f"{store.state}/logs/{plan['name']}-<stamp>-<id>.log",
                              {**plan["env"], "MIYABI_SUBMIT_ID": "<id>"}, Path("<snapshot>"))
         return ok(dry_run=True, valid=valid, plan=plan, plan_digest=plan["plan_digest"] if valid else None,
@@ -481,13 +492,14 @@ def submit(settings: Settings, args: dict) -> dict:
             "submit": {**{k: plan[k] for k in ("queue", "route", "group", "select", "units", "unit", "walltime",
                                                  "walltime_s", "requested_unit_hours", "workdir", "join", "depend",
                                                  "array", "plan_digest", "expected_seconds", "note",
-                                                 "script_source", "script_digest")},
+                                                 "script_source", "script_digest", "interactive")},
                        "submitted_at": now_iso(), "host": os.uname().nodename.split(".")[0], "output": output,
                        "env_names": sorted(env), "actor": args.get("_actor")},
         }
         store.new_submission(record)
         script = directory / "script.sh"
-        script.write_text(extra["script_text"], encoding="utf-8")
+        if not plan["interactive"]:
+            script.write_text(extra["script_text"], encoding="utf-8")
         argv = build_argv(plan, output, env, script)
         record["submit"]["argv"] = ["qsub", *argv]
         store.write(record)
@@ -495,7 +507,8 @@ def submit(settings: Settings, args: dict) -> dict:
             write_json(store.request_path(key), {"request_key": key, "submit_id": submit_id, "status": "submitting",
                                                  "updated_at": now_iso()})
         try:
-            result = pbs.qsub(argv, cwd=Path(plan["workdir"]))
+            result = (interactive_qsub(argv, cwd=Path(plan["workdir"]), output=Path(output))
+                      if plan["interactive"] else pbs.qsub(argv, cwd=Path(plan["workdir"])))
         except MiyabiError as exc:
             return _uncertain(settings, store, record, str(exc))
         if result.returncode != 0:

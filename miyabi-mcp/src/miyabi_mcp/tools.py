@@ -6,7 +6,7 @@ import traceback
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from . import jobs, notify, submit as submissions
+from . import interactive, jobs, notify, submit as submissions
 from .config import Settings
 from .ledger import register_project
 from .util import MiyabiError, failure
@@ -79,7 +79,7 @@ TOOLS = [
          jobs.job_list),
     Tool("job_get", "Job details",
          "Details of 1–40 jobs from qstat -f (active) or qstat -H -f (finished): times, resources, exit status, "
-         "paths, ledger record, MIYABI_* variables; tail_lines reads the end of the job's own output file.",
+         "paths, ledger record, MIYABI_* variables; tail_lines reads the job's output file or interactive transcript.",
          schema({"job_ids": {**STRS, "minItems": 1, "maxItems": 40},
                  "tail_lines": {"type": "integer", "minimum": 0, "maximum": 200}}, ("job_ids",)),
          jobs.job_get),
@@ -88,7 +88,8 @@ TOOLS = [
          "and walltime, the scheduled stop, group, limits and the project policy, and returns the plan with a "
          "plan_digest. Call again with the same arguments, dry_run=false and that plan_digest to run qsub. "
          "request_key makes retries safe; client_ref is exported as the attempt id. Jobs get MIYABI_SUBMIT_ID, "
-         "MIYABI_CLIENT_REF, MIYABI_PROJECT_DIR and MIYABI_JOB_RECORD; output defaults to <project>/.miyabi-mcp/logs/.",
+         "MIYABI_CLIENT_REF, MIYABI_PROJECT_DIR and MIYABI_JOB_RECORD; output defaults to <project>/.miyabi-mcp/logs/. "
+         "For an interactive compute shell use interactive_plan instead.",
          schema({"script": {**STR, "description": "Absolute path of the job script."},
                  "script_text": {**STR, "description": "The job script itself (stored as the snapshot)."},
                  "queue": {**STR, "description": "Top-level queue, e.g. debug-g, regular-g, debug-mig."},
@@ -106,6 +107,33 @@ TOOLS = [
                             "description": "Add this job to a notification (created on first use of its name)."}},
                 ("queue", "walltime")),
          submissions.submit, read_only=False),
+    Tool("interactive_plan", "Plan an interactive allocation",
+         "Checks live queue shape, walltime, accounting group, limits and project policy, then returns a "
+         "10-minute plan and launch_command/terminal_open arguments for pi-env-mcp. This call does not submit. "
+         "Run the command in a persistent PTY on the login node; it rechecks policy, submits qsub -I and records "
+         "the job before relaying the shell. Keep terminal_id for terminal_send/read; a timeout is not cancellation. "
+         "After the compute prompt, run allocation_check_command in that terminal before any workloads. "
+         "exit releases the allocation and closes the terminal; job_cancel handles queued/running cancellation. "
+         "Reuse request_key for retries; a lost terminal cannot be reattached.",
+         schema({"queue": {"enum": ["interact-g", "interact-c", "interact-mig"]},
+                 "walltime": {**STR, "description": "Required HH:MM:SS, sized for the actual work."},
+                 "select": {**STR, "description": "PBS select, e.g. 1:mpiprocs=1; MIG counts instances."},
+                 "nodes": {"type": "integer", "minimum": 1}, "group": STR, "name": STR,
+                 "workdir": {**STR, "description": "Submission cwd; cd here explicitly in the compute shell."},
+                 "env": {"type": "object", "additionalProperties": STR},
+                 "labels": LABELS, "client_ref": STR, "note": STR,
+                 "request_key": {**STR, "minLength": 1,
+                                 "description": "Unique logical allocation key; reuse for retries."}},
+                ("queue", "walltime", "request_key")),
+         interactive.plan, read_only=False),
+    Tool("allocation_check", "Verify the current compute allocation",
+         "Checks THIS process's host, architecture, PBS_JOBID, nodefile, current PBS RUNNING state, owner and "
+         "exec_host; returns ok=false outside a confirmed target allocation, plus remaining_walltime_s when known. "
+         "An MCP server on login cannot check your remote compute shell: run the returned allocation_check_command "
+         "with pi-env-mcp terminal_send inside the allocation. Require exit 0 and ok=true before workloads; "
+         "repeat after a shell change. Unknown remaining walltime is null, never unlimited.",
+         schema({"target_system": {"enum": ["Miyabi-G", "Miyabi-C"]},
+                 "expected_job_id": STR}, ("target_system",)), interactive.allocation_check),
     Tool("job_cancel", "Cancel jobs",
          "dry_run=true (default) lists the targets and a targets_digest; dry_run=false with a reason and that "
          "digest runs qdel. Only jobs in this project's ledger unless the policy allows cancel_scope=any.",

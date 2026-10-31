@@ -185,7 +185,9 @@ def job_get(settings: Settings, args: dict) -> dict:
                  "detail": states.detail_summary(fields) if fields else None,
                  "variables": {k: v for k, v in variables.items() if k.startswith("MIYABI_") or k in names}}
         if tail and fields:
-            path = entry["detail"].get("output_path")
+            submission = (record or {}).get("submit") or {}
+            path = submission.get("output") if submission.get("interactive") else entry["detail"].get("output_path")
+            entry["output_source"] = "terminal_transcript" if submission.get("interactive") else "pbs_output"
             if path and Path(path).is_file():
                 try:
                     entry["output_tail"] = tail_text(Path(path), tail)

@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import sys
 import tempfile
 import time
@@ -137,14 +138,16 @@ def qsub(args):
     if mode == "fail":
         print("qsub: Unknown queue", file=sys.stderr)
         return 170
+    interactive = "-I" in args
+    words = [arg for arg in args if arg != "-I"]
     options = {"-v": "", "-W": [], "-l": []}
-    for index in range(0, len(args) - 1, 2):
-        flag, value = args[index], args[index + 1]
+    for index in range(0, len(words) - 1, 2):
+        flag, value = words[index], words[index + 1]
         if flag in ("-W", "-l"):
             options[flag].append(value)
         else:
             options[flag] = value
-    script = args[-1]
+    script = "" if interactive else args[-1]
     limits = dict(item.split("=", 1) for item in options.get("-l", []))
     number = str(state["next_id"])
     state["next_id"] += 1
@@ -163,6 +166,26 @@ def qsub(args):
         "submit_args": " ".join(shlex.quote(a) for a in args), "cwd": os.getcwd(), "script": script,
     }
     save(state)
+    if interactive:
+        if mode == "interactive_silent":
+            while load()["jobs"][number]["state"] != "F":
+                time.sleep(0.05)
+            return 1
+        print(f"qsub: waiting for job {number}.{state.get('server', 'opbs')} to start", flush=True)
+        if mode == "interactive_queue":
+            while load()["jobs"][number]["state"] != "F":
+                time.sleep(0.05)
+            return 1
+        state = load()
+        state["jobs"][number].update(state="R", stime=time.time())
+        save(state)
+        print(f"qsub: job {number}.{state.get('server', 'opbs')} ready", flush=True)
+        env = dict(os.environ, **parse_v(options["-v"]), PBS_JOBID=f"{number}.{state.get('server', 'opbs')}", PS1="compute> ")
+        result = subprocess.call(["/bin/bash", "--noprofile", "--norc", "-i"], env=env)
+        state = load()
+        state["jobs"][number].update(state="F", exit_status=result, obittime=time.time(), used="00:00:01")
+        save(state)
+        return result
     if mode == "garbage":
         print("qsub: connection reset")
         return 0

@@ -25,6 +25,17 @@ miyabi-mcp operates Miyabi PBS for this project: queries, submission, cancellati
 - Submitting is two calls: job_submit (dry run) shows the checked plan; show it to the user when the
   job is not clearly within their authorization, then call again with dry_run=false and the plan_digest.
   Size walltime from measurements (about 1.5x); a user's limit is a cap, never the request.
+- Interactive work: call interactive_plan with an interact-g/interact-c/interact-mig queue, walltime and
+  a unique request_key. It only prepares a checked plan. Run its launch_command in pi-env-mcp terminal_open
+  on the login node within 10 minutes; keep terminal_id and use terminal_read/send for that same shell.
+  The runner rechecks policy, submits qsub -I, records the job ID, and closes the terminal when qsub ends.
+  Wait for the compute prompt, then run allocation_check_command IN THAT TERMINAL and require ok=true.
+  pbs_context/allocation_check on this login-side MCP server cannot verify the remote compute shell.
+  Set modules, cd to the project and select its interpreter there; inspect remaining walltime before work.
+  Run fallible checks in a child shell so failure does not close the allocation. Preserve outputs under
+  /work, stop owned background processes, then exit; use job_get to confirm completion. For cancellation
+  use job_cancel dry-run/commit for the exact ID, then terminal_close. Terminal timeouts do not cancel;
+  lost terminals cannot be reattached. Check the existing job before retrying with the same request_key.
 - FINISH and Exit_status=0 do not mean the application succeeded: check the outputs. A FINISH without
   a start time never ran.
 - Do not poll in a loop. For jobs of a few minutes use job_wait. For longer ones submit with

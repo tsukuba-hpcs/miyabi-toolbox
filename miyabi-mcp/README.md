@@ -95,11 +95,99 @@ agent with shell access to the project could still edit the file, so do not ask 
 | `pbs_queues` | queue shapes and status (REMAIN_ELAPSE), project limits, occupancy, token budget |
 | `job_list`, `job_get` | jobs from one shared `qstat -ll` snapshot; details from `qstat [-H] -f`; output tails |
 | `job_submit` | dry run → checked plan + `plan_digest`; same arguments + `dry_run=false` + digest → qsub; `notify` adds the job to a notification group |
+| `interactive_plan` | checked interactive allocation plan → `launch_command` and pi-env-mcp `terminal_open` arguments; submission happens when that command runs in a PTY |
+| `allocation_check` | verify the calling shell's compute host, target architecture, nodefile and live PBS allocation; fails outside a confirmed running allocation |
 | `job_cancel` | dry run → targets + digest; commit with a reason → qdel |
 | `job_wait` | bounded wait (≤ 45 s) for short jobs |
 | `notify_create`, `notify_update`, `notify_list`, `notify_cancel`, `notify_ack` | notifications for job groups, a queue reopening, or a timeout |
 | `ledger_query` | records, summary, events, or smooth-research observations; `export_command` prints them as JSONL |
 | `job_annotate` | labels, notes, application-level verdicts; `adopt` jobs submitted elsewhere |
+
+## Interactive compute allocations
+
+Use an interactive allocation for short iterative tests, builds and debugging. The workflow follows
+[miyabi-pbs-cmd's interactive guidance](../miyabi-pbs-cmd/references/qsub.md#interactive-work).
+`miyabi-mcp` checks resources and policy and keeps the job ledger; pi-env-mcp's persistent terminal carries
+the shell. Both servers must be configured, and the Miyabi installation of `bin/miyabi-mcp` and its Python
+environment must be usable from the selected compute system. G is aarch64; C needs its own x86_64 venv.
+
+1. Call `pbs_context`, then `pbs_queues` to inspect current queues, accounting groups, limits and remaining
+   walltime before maintenance. Select a top-level `interact-g`, `interact-c` or `interact-mig` queue;
+   indented destinations such as `interact-g_n1` are not submission targets. `select` counts nodes for
+   G/C and MIG instances for MIG. Omit `group` only when there is exactly one eligible choice.
+2. Call `interactive_plan`, for example:
+
+   ```json
+   {"queue":"interact-g","nodes":1,"walltime":"00:05:00",
+    "name":"interactive-check","request_key":"project-check-001"}
+   ```
+
+   Optional arguments: `select` (e.g. `1:mpiprocs=1`), `group`, `name`, `workdir`, `env`, `labels`,
+   `client_ref`, `note`, and the usual `project`. `queue`, `walltime` and `request_key` are required.
+   This checks the same queue, group, per-job, concurrency and budget policies as batch submissions.
+   It returns `valid`, `checks`, `plan`, `plan_digest`, `qsub_preview` and, on success,
+   `launch_command`, `terminal_open` and `allocation_check_command`. It submits **no PBS job**.
+   Choose a fresh request key per intended allocation, and reuse that key for retries of that allocation.
+3. Within 10 minutes, pass the returned `terminal_open` object to **pi-env-mcp `terminal_open`**. Adjust
+   its `host` to the configured pi-env-mcp login alias if necessary (normally `miyabi-g`). The command
+   uses `exec ... interactive-start <plan_digest>` so completion closes the terminal. Keep the returned
+   `terminal_id`; all subsequent input goes to that same terminal. The runner rechecks policy at launch,
+   runs `qsub -I`, records its exact job ID and prints a JSON submission result with the transcript path
+   and a check command tied to that job. The user-level submit lock is released once PBS accepts the job,
+   so queue waiting does not block other submissions.
+4. Read output with pi-env-mcp `terminal_read` until the compute shell appears. An accepted job ID or
+   quiet output is not evidence of a ready shell. `job_get` and `job_wait` with `when="started"` provide
+   scheduler state; `job_wait` waits at most 45 seconds. For longer waits, create a notification with
+   `when="started"` for the recorded job and keep the terminal connection alive. A terminal tool timeout
+   leaves the allocation queued or running; do not start another terminal to repeat the submission.
+5. Send the returned `allocation_check_command` followed by `\n` using pi-env-mcp `terminal_send`:
+
+   ```json
+   {"terminal_id":"t1","input":"<allocation_check_command>\n","timeout":10}
+   ```
+
+   Replace the placeholder with the returned command. Require exit 0 and `ok=true` before executing
+   workloads. The check combines the current hostname, architecture, `PBS_JOBID`, `PBS_NODEFILE`,
+   live PBS RUNNING state, owner and execution hosts. It also reports `remaining_walltime_s` (`null`
+   means unknown). Calling `allocation_check` on the login-side MCP server checks that server's shell;
+   it cannot confirm the compute shell in your terminal. Recheck after any shell/host change.
+6. In the confirmed compute shell, `cd "$MIYABI_PROJECT_DIR"` (or the requested `workdir`), establish
+   [modules](../miyabi-pbs-shell-template/references/module.md) and select the project's interpreter.
+   Exports, loaded modules, cwd and REPL state persist across `terminal_send` calls. Run fallible tests
+   in a child shell, inspect their exit code, and save logs under `/work`, for example:
+
+   ```bash
+   # CHECK_SCRIPT must already point to the intended validation script.
+   export CHECK_SCRIPT
+   export LOG_ROOT="$MIYABI_PROJECT_DIR/validation/$PBS_JOBID"
+   mkdir -p "$LOG_ROOT"
+   bash -o pipefail -c 'bash "$CHECK_SCRIPT" 2>&1 | tee "$LOG_ROOT/validation.log"'
+   printf 'validation exit=%s\n' "$?"
+   ```
+
+   Check remaining walltime before starting each substantial step. Tests, application imports, builds
+   and GPU work belong in this confirmed allocation, not on the login host. `C-c` through
+   `terminal_send(keys=["C-c"])` interrupts foreground work; inspect the shell before sending more input.
+7. Preserve required scratch outputs and stop your own background processes. Send `exit\n` to release
+   the allocation; the terminal closes when qsub ends, without falling back to a login shell. Use
+   `job_get` to confirm completion and inspect application outputs; FINISH alone is not success.
+   To cancel a queued or running allocation, use `job_cancel` dry-run and commit with the exact job ID,
+   digest and reason, then `terminal_close`. Normal terminal exit does not require a separate cancel.
+
+The CLI equivalent of step 2 is
+`bin/miyabi-mcp --project-dir <dir> call interactive_plan '<JSON above>'`; run its returned command in a
+persistent PTY, never pi-env-mcp `bash` or a pipe. Interactive jobs use the ordinary ledger, labels,
+budget accounting, `job_list`, `job_get`, `job_cancel` and notifications. Their `submit.interactive` is
+true; `output` points to a raw terminal transcript under `.miyabi-mcp/logs/`, rather than a PBS output
+file. `job_get(tail_lines=…)` reads this transcript and reports `output_source="terminal_transcript"`.
+Store important application logs separately. There is no batch script snapshot for these jobs.
+
+Closing the terminal, restarting pi-env-mcp or losing its connection ends the terminal session. The
+runner attempts to cancel its exact allocation on a caught disconnect; abrupt process/node failure
+cannot guarantee cleanup. Check `job_get` and cancel any remaining job before starting a replacement.
+Re-running a launch with the same `request_key` returns the existing job and never reattaches a shell or
+creates another allocation. An uncertain submission is reconciled by `MIYABI_SUBMIT_ID`; do not bypass
+that result with a new key. Re-plan after plan expiry; use a new key only for an intentional new allocation.
 
 ## Notifications
 
@@ -142,3 +230,12 @@ workstation; the MIG profile of debug-mig (`GH200 MIG 2g.24gb`); the notificatio
 over real ssh; and, in smooth-research's end-to-end test, a group of three jobs notified once through the
 listener, acknowledged and exported into `rl run record`. herdr, tmux and codex_queue delivery and Miyabi-C
 have not been run live.
+
+Interactive verification (2026-10-31 UTC / 2026-11-01 JST), through pi-env-mcp on `miyabi-g`: a one-node
+`interact-g` allocation on `mg0004` (job `3752062.opbs`) passed both allocation guards, retained shell
+variables/cwd across calls, survived a failing child check and exited normally (PBS Exit_status 0).
+A second allocation on `mg0032` (`3752112.opbs`) ran all 52 tests successfully, then was cancelled through
+`job_cancel` (PBS Exit_status 265, ledger outcome `cancelled`). Both were confirmed finished, with no
+active jobs left in the test project. Transcript tails, idempotent launch retries and rejection of login-side
+allocation checks were also verified. C and MIG interactive allocations, and real connection-loss cleanup, remain untested live;
+fake-PBS tests cover C/MIG planning and disconnect cleanup before and after receipt of the job ID.
