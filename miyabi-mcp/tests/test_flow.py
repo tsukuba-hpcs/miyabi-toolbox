@@ -877,9 +877,10 @@ class LockTests(unittest.TestCase):
 
     def test_waiting_does_not_shorten_the_lease(self):
         first = Lock(self.path, lease=60, timeout=0).acquire()
-        threading.Timer(0.6, first.release).start()
+        threading.Timer(1.5, first.release).start()
         second = Lock(self.path, lease=60, timeout=5).acquire()
-        self.assertLess(time.time() - self.path.stat().st_mtime, 0.4)
+        # Counted from when the wait began, the lock would look 1.5 s old; whole-second mtimes (Lustre) add < 1 s.
+        self.assertLess(time.time() - self.path.stat().st_mtime, 1.25)
         second.release()
 
     def test_a_breaker_moves_only_the_stale_lock(self):

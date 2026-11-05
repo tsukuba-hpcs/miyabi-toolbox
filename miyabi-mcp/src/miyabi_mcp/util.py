@@ -18,6 +18,8 @@ from typing import Any, Iterator
 
 SCHEMA_VERSION = 1
 HMS = re.compile(r"(\d+):([0-5]\d):([0-5]\d)")
+# Lustre on Miyabi's /work keeps whole-second mtimes (truncated): a lock may look up to this much older.
+MTIME_SLACK_S = 1.0
 NOTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")  # host-like: it becomes file names and command words
 DIAGNOSTIC_LIMIT = 4096
 
@@ -280,9 +282,12 @@ class Lock:
         self.token = None
         return False
 
+    def _expired(self, mtime: float) -> bool:
+        return time.time() - mtime > self.lease + MTIME_SLACK_S
+
     def _stale(self) -> bool:
         try:
-            return time.time() - self.path.stat().st_mtime > self.lease
+            return self._expired(self.path.stat().st_mtime)
         except FileNotFoundError:
             return False
 
@@ -315,7 +320,7 @@ class Lock:
         except FileNotFoundError:
             return
         try:
-            if time.time() - moved.stat().st_mtime <= self.lease:
+            if not self._expired(moved.stat().st_mtime):
                 # Taken again between our check and the rename (possible only for an unguarded lock): give it back.
                 with contextlib.suppress(FileExistsError):
                     os.link(moved, self.path)
