@@ -116,9 +116,10 @@ def validate(data: Any, where: str) -> dict:
     return data
 
 
-def _read(path) -> dict:
+def _read(path) -> Any:
+    """The file's JSON as written; {} only when there is no file (null, [] or 0 must fail validation)."""
     try:
-        return read_json(path, {}) or {}
+        return read_json(path, {})
     except json.JSONDecodeError as exc:
         raise MiyabiError("invalid_policy", f"{path}: {exc}") from None
 

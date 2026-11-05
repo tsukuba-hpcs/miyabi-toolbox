@@ -7,6 +7,7 @@ reconciled through MIYABI_SUBMIT_ID in the job's Variable_List before anything i
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import shlex
@@ -241,10 +242,17 @@ def build_plan(settings: Settings, store: Store, args: dict, policy: dict) -> tu
     elif placeholders:
         checks.add("script.placeholders", "warn", "allowed by caller: " + shown)
     found = directive_keys(directives(text))
-    overridden = sorted(key for key in found if key in {"-q", "-N", "-o", "-j", "-J", "-l select", "-l walltime",
-                                                         "-W group_list", "-W depend"})
+    # What build_argv puts on the command line, which wins over the script's #PBS lines.
+    given = {"-q", "-N", "-l select", "-l walltime", "-W group_list"} | ({"-o", "-j"} if not interactive else set()) \
+        | ({"-W depend"} if args.get("depend") else set())
+    overridden = sorted(key for key in found if key in given)
     if overridden:
         checks.add("script.directives", "warn", "the command line overrides #PBS " + ", ".join(overridden))
+    if args.get("array") or "-J" in found:
+        # One plan, budget window and reservation would count a single subjob of the whole array.
+        checks.add("array", "fail", "array jobs (array, or #PBS -J in the script) are not supported: their requested "
+                   "amount, measured usage, cancellation and notifications are not accounted per subjob yet. "
+                   "Submit the members as separate jobs (a notify group with `expected` waits for all of them)")
     # -- resources
     queue = args.get("queue")
     walltime = args.get("walltime")
@@ -379,7 +387,11 @@ def build_plan(settings: Settings, store: Store, args: dict, policy: dict) -> tu
 
 
 def volatile_checks(settings: Settings, store: Store, plan: dict, policy: dict) -> Checks:
-    """Checks that depend on live state; repeated inside the submit lock."""
+    """Checks that depend on live state; repeated inside the submit lock.
+
+    The active table must postdate the user's latest qsub acceptance: a cached table read before it misses
+    that job, and back-to-back commits would each see room under max_active_jobs (DESIGN.md 8.3).
+    """
     checks = Checks()
     pbs = Pbs(settings)
     limits = pbs.limits()["limits"]
@@ -395,9 +407,10 @@ def volatile_checks(settings: Settings, store: Store, plan: dict, policy: dict) 
         run = row.get("run") or {}
         if run and run.get("used", 0) >= run.get("limit", 0):
             checks.add("limit.run", "warn", f"{run['used']}/{run['limit']} running: the job will queue")
-    snap = observe.snapshot(settings, max_age=15)
+    snap = observe.snapshot(settings, max_age=15, newer_than=observe.last_accepted(settings))
     active_ids = {job_num(row["job_id"]) for row in snap["jobs"]}
-    project_active = [r for r in store.records() if r.get("job_num") in active_ids]
+    records = list(store.records())  # one pass over the ledger: it holds every submission of the project
+    project_active = [r for r in records if r.get("job_num") in active_ids]
     if "max_active_jobs" in policy:
         count = len(project_active)
         checks.add("policy.max_active_jobs", "pass" if count < policy["max_active_jobs"] else "fail",
@@ -409,17 +422,12 @@ def volatile_checks(settings: Settings, store: Store, plan: dict, policy: dict) 
         count = sum(1 for r in project_active if (r.get("labels") or {}).get(key) == value)
         checks.add(f"policy.label.{key}", "pass" if count < limit["max_active_jobs"] else "fail",
                    f"{count} active with {key}={value}; limit {limit['max_active_jobs']}")
-    checks.extend(policies.window_checks(policy.get("budget_windows", []),
-                                         policies.project_submissions(store.records()),
+    checks.extend(policies.window_checks(policy.get("budget_windows", []), policies.project_submissions(records),
                                          plan["unit"], plan["units"] * plan["walltime_s"], "project"))
     if policy.get("budget"):
-        records = list(store.records())
-        try:
-            # Up-to-date states replace reservations by measurements; stale ones only reserve more.
-            observe.refresh(store, [r for r in records if r.get("job_id")], snap)
-            records = list(store.records())
-        except MiyabiError:
-            pass
+        # Up-to-date states replace reservations by measurements; stale ones only reserve more.
+        with contextlib.suppress(MiyabiError):
+            records = observe.refreshed(store, records, snap)
         checks.append(policies.budget_check(policy["budget"], records, plan["unit"],
                                             plan["units"] * plan["walltime_s"]))
     user = policy.get("user") or {}
@@ -468,26 +476,45 @@ def reconcile(settings: Settings, record: dict) -> str | None:
     return None
 
 
-def _bind(settings: Settings, store: Store, record: dict, job_id: str) -> dict:
+def bind_submission(settings: Settings, store: Store, record: dict, job_id: str, *, reconciled: bool = False) -> dict:
+    """Bind a submission to the job qsub accepted (or reconciliation found); returns the stored record.
+
+    The stored record is changed under its job lock rather than replaced by the caller's copy: once the
+    job link exists, another process may record events, and an older copy would set `seq` back (repeated
+    event IDs). Binding an already bound submission again changes nothing.
+    """
     store.bind(record["submit_id"], job_id)
-    record.update(job_id=job_id, job_num=job_num(job_id), status="submitted")
-    record["submit"]["accepted_ts"] = time.time()
-    store.write(record)
-    if record.get("request_key"):
+
+    def change(current: dict) -> None:
+        if not current.get("job_id"):
+            current.update(job_id=job_id, job_num=job_num(job_id), status="submitted")
+            current["submit"].update(accepted_ts=time.time(), indexed=False)
+            if reconciled:
+                current["submit"]["reconciled"] = True
+
+    record = store.update(job_id, change)
+    submit = record["submit"]
+    if submit.get("indexed") is False:  # (absent on records bound before the flag existed: indexed then)
+        # User-level budget windows read only the index: a job missing there would never be counted.
+        observe.mark_accepted(settings, submit["accepted_ts"])
+        index_append(settings, {"type": "submitted", "job_id": job_id, "project_dir": str(store.project_dir),
+                                "submit_id": record["submit_id"], "name": record["name"], "queue": submit["queue"],
+                                "units": submit["units"], "unit": submit["unit"], "walltime_s": submit["walltime_s"],
+                                "requested": submit["requested_unit_hours"], "submitted_at": submit["submitted_at"],
+                                "labels": record.get("labels") or {}})
+        record = store.update(job_id, lambda current: current["submit"].update(indexed=True))
+    if record.get("request_key"):  # last: until it names the job, a retry with the key completes this bind
         write_json(store.request_path(record["request_key"]),
                    {"request_key": record["request_key"], "submit_id": record["submit_id"], "job_id": job_id,
                     "status": "submitted", "updated_at": now_iso()})
-    submit = record["submit"]
-    index_append(settings, {"type": "submitted", "job_id": job_id, "project_dir": str(store.project_dir),
-                            "submit_id": record["submit_id"], "name": record["name"], "queue": submit["queue"],
-                            "units": submit["units"], "unit": submit["unit"], "walltime_s": submit["walltime_s"],
-                            "requested": submit["requested_unit_hours"], "submitted_at": submit["submitted_at"],
-                            "labels": record.get("labels") or {}})
     return record
 
 
-def _first_event(settings: Settings, store: Store, job_id: str) -> list[dict]:
-    """The `submitted` event, confirmed by one `qstat -f` when possible (DESIGN.md 7.3)."""
+def first_events(settings: Settings, store: Store, job_id: str) -> list[dict]:
+    """The `submitted` event, confirmed by one `qstat -f` when possible (DESIGN.md 7.3); nothing when the
+    job already has events (a second bind of the same submission)."""
+    if (store.find(job_id) or {}).get("seq"):
+        return []
     details = {}
     try:
         details = Pbs(settings).detail([job_id])
@@ -510,18 +537,115 @@ def _first_event(settings: Settings, store: Store, job_id: str) -> list[dict]:
     return [event for event in events if event]
 
 
+def _earlier(settings: Settings, store: Store, key: str, args: dict) -> dict | None:
+    """The job an earlier call with this request_key submitted, or None if it submitted none (submit lock held).
+
+    An earlier qsub with an unknown result is looked for first; without its job, only resubmit=true
+    lets the caller submit again.
+    """
+    request = read_json(store.request_path(key))
+    if not request:
+        return None
+    if request.get("job_id"):
+        record = store.find(request["job_id"]) or {}
+        return ok(idempotent=True, job_id=request["job_id"], submit_id=request["submit_id"],
+                  record=store.locator(request["job_id"]), state=record.get("state"),
+                  **_rejoin(settings, store, record))
+    if request.get("status") in {"submitting", "uncertain"}:
+        previous = store.read_submission(request["submit_id"])
+        # Already bound when the call stopped before the key named the job: the bind is completed then.
+        known = (previous or {}).get("job_id")
+        found = (known or reconcile(settings, previous)) if previous else None
+        if found and previous:
+            bound = bind_submission(settings, store, previous, found, reconciled=True)
+            return ok(idempotent=True, job_id=found, submit_id=previous["submit_id"], record=store.locator(found),
+                      events=first_events(settings, store, found), **({} if known else {"reconciled": True}),
+                      **_rejoin(settings, store, bound))
+        if not args.get("resubmit"):
+            raise MiyabiError("submit_uncertain", "an earlier qsub with this request_key has an unknown result and "
+                              "no job carries its submit ID; pass resubmit=true to submit again",
+                              submit_id=request.get("submit_id"))
+    return None
+
+
+def _join(settings: Settings, store: Store, spec: dict | None, job_id: str) -> dict:
+    """Add the job to its notification (job_submit notify=). Called under the submit lock, so a retry sees
+    whether it joined. A failure is reported next to the job, never instead of it."""
+    if not spec:
+        return {}
+    from .notify import join
+
+    try:
+        return {"notify": join(settings, store, spec, job_id)}
+    except MiyabiError as exc:
+        return {"notify_error": exc.to_dict(),
+                "warning": (f"job {job_id} was submitted WITHOUT a notification: {exc.message}. Nothing will tell "
+                            f"you when it ends: create one with notify_create(job_ids=[\"{job_id}\"], ...) and run "
+                            "its command, or follow the job with job_wait/job_get")}
+
+
+def _rejoin(settings: Settings, store: Store, record: dict) -> dict:
+    """On a retry, the notification its first call never joined: the job was found only now, or that call
+    stopped between qsub and joining."""
+    spec = (record.get("submit") or {}).get("notify")
+    if not spec or not record.get("job_id") or record.get("notifications"):
+        return {}
+    return _join(settings, store, spec, record["job_id"])
+
+
+def _key_check(store: Store, key: str) -> tuple[str, str]:
+    """The dry run's view of the idempotency key. A used key only warns: retrying with it is the safe way to
+    find out what an interrupted commit did, and a failed check would invite a new key (a second job)."""
+    request = read_json(store.request_path(key)) or {}
+    if request.get("job_id"):
+        return "warn", (f"request_key was already used for job {request['job_id']}: a commit with it returns that "
+                        "job and submits nothing. Only for a second, separate job use a new request_key")
+    if request.get("status") in {"submitting", "uncertain"}:
+        return "warn", ("an earlier qsub with this request_key has an unknown result: a commit looks for its job "
+                        "first and submits again only with resubmit=true")
+    if request:
+        return "pass", f"an earlier qsub with this request_key was rejected ({request.get('status')}); it can be reused"
+    return "pass", "not used before"
+
+
+def _prune_plans(store: Store) -> None:
+    """Delete plan files well past PLAN_TTL_S: commits refuse them anyway (plan_expired)."""
+    cutoff = time.time() - 2 * PLAN_TTL_S
+    for path in (store.state / "plans").glob("*.json"):
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+        except FileNotFoundError:  # pruned by a concurrent dry run
+            continue
+
+
 def submit(settings: Settings, args: dict, *, interactive_qsub=None) -> dict:
     if args.get("interactive") and not args.get("dry_run", True) and interactive_qsub is None:
         raise MiyabiError("terminal_required", "use interactive_plan and run its launch_command in a persistent PTY")
     store = Store(settings)
     register_project(settings)
+    dry_run = args.get("dry_run", True)
+    key = args.get("request_key")
+    if key and not dry_run:
+        # A retry of a call that already submitted gets that job back, even after its plan expired.
+        with submit_lock(settings):
+            earlier = _earlier(settings, store, key, args)
+        if earlier:
+            return earlier
     policy = policies.load(settings)
     plan, checks, extra = build_plan(settings, store, args, policy)
-    if args.get("dry_run", True):
-        if not checks.failed:
+    if dry_run:
+        used = bool(key) and bool((read_json(store.request_path(key)) or {}).get("job_id"))
+        if key:
+            checks.add("request_key", *_key_check(store, key))
+        for check in checks if used else []:
+            if check["id"] == "notify" and check["status"] == "fail":  # e.g. sealed by this very job
+                check.update(status="warn", detail="does not apply: the key's job exists. " + check["detail"])
+        if not checks.failed and not used:  # a commit with a used key submits nothing: no live limits to judge
             checks.extend(volatile_checks(settings, store, plan, policy))
         valid = not checks.failed
         if valid:
+            _prune_plans(store)
             write_json(store.plan_path(plan["plan_digest"]), {"created_at": now_iso(), "plan": plan,
                                                              "arguments": args if plan["interactive"] else None})
         preview = build_argv(plan, plan["output"] or f"{store.state}/logs/{plan['name']}-<stamp>-<id>.log",
@@ -544,25 +668,11 @@ def submit(settings: Settings, args: dict, *, interactive_qsub=None) -> dict:
         if not saved or not within(saved.get("created_at"), PLAN_TTL_S):
             raise MiyabiError("plan_expired", "the plan is older than 10 minutes or unknown; run the dry run again")
     pbs = Pbs(settings)
-    with submit_lock(settings):
-        key = plan.get("request_key")
-        if key:
-            request = read_json(store.request_path(key))
-            if request and request.get("job_id"):
-                record = store.find(request["job_id"])
-                return ok(idempotent=True, job_id=request["job_id"], submit_id=request["submit_id"],
-                          record=store.locator(request["job_id"]), state=(record or {}).get("state"))
-            if request and request.get("status") in {"submitting", "uncertain"}:
-                previous = store.read_submission(request["submit_id"])
-                found = reconcile(settings, previous) if previous else None
-                if found and previous:
-                    _bind(settings, store, previous, found)
-                    return ok(idempotent=True, reconciled=True, job_id=found, submit_id=previous["submit_id"],
-                              record=store.locator(found), events=_first_event(settings, store, found))
-                if not args.get("resubmit"):
-                    raise MiyabiError("submit_uncertain", "an earlier qsub with this request_key has an unknown "
-                                      "result and no job carries its submit ID; pass resubmit=true to submit again",
-                                      submit_id=request.get("submit_id"))
+    with submit_lock(settings) as lock:
+        if key:  # again under the lock: a concurrent call with the same key may have submitted meanwhile
+            earlier = _earlier(settings, store, key, args)
+            if earlier:
+                return earlier
         live = volatile_checks(settings, store, plan, policy)
         if live.failed:
             raise MiyabiError("plan_rejected", "a live check failed", checks=live)
@@ -584,7 +694,7 @@ def submit(settings: Settings, args: dict, *, interactive_qsub=None) -> dict:
             "submit": {**{k: plan[k] for k in ("queue", "route", "group", "select", "units", "unit", "walltime",
                                                  "walltime_s", "requested_unit_hours", "workdir", "join", "depend",
                                                  "array", "plan_digest", "expected_seconds", "note",
-                                                 "script_source", "script_digest", "interactive")},
+                                                 "script_source", "script_digest", "interactive", "notify")},
                        "submitted_at": now_iso(), "host": os.uname().nodename.split(".")[0], "output": output,
                        "env_names": sorted(env), "actor": args.get("_actor")},
         }
@@ -598,42 +708,49 @@ def submit(settings: Settings, args: dict, *, interactive_qsub=None) -> dict:
         if key:
             write_json(store.request_path(key), {"request_key": key, "submit_id": submit_id, "status": "submitting",
                                                  "updated_at": now_iso()})
-        try:
-            result = (interactive_qsub(argv, cwd=Path(plan["workdir"]), output=Path(output))
-                      if plan["interactive"] else pbs.qsub(argv, cwd=Path(plan["workdir"])))
-        except MiyabiError as exc:
-            return _uncertain(settings, store, record, str(exc))
-        if result.returncode != 0:
-            record.update(status="submit_failed", error=result.stderr.strip()[-2000:])
+        if not lock.renew():  # the checks overran the lock's lease and it was broken: another call may submit now
+            record.update(status="submit_failed", error="not submitted: the user's submit lock was taken over")
             store.write(record)
             if key:
                 write_json(store.request_path(key), {"request_key": key, "submit_id": submit_id, "status": "failed",
                                                      "updated_at": now_iso()})
-            raise MiyabiError("qsub_failed", "qsub rejected the job", returncode=result.returncode,
-                              stdout=result.stdout[-2000:], stderr=result.stderr[-2000:], submit_id=submit_id)
-        job_id = parse_job_id(result.stdout)
-        if job_id is None:
-            return _uncertain(settings, store, record, f"unparsable qsub output: {result.stdout[-500:]!r}")
-        _bind(settings, store, record, job_id)
-    events = _first_event(settings, store, job_id)
+            raise MiyabiError("lock_lost", "the checks took longer than the submit lock's lease and another call "
+                              "took the lock; nothing was submitted. Run the commit again", submit_id=submit_id)
+        reconciled = False
+        try:
+            result = (interactive_qsub(argv, cwd=Path(plan["workdir"]), output=Path(output))
+                      if plan["interactive"] else pbs.qsub(argv, cwd=Path(plan["workdir"])))
+        except MiyabiError as exc:
+            result, job_id, reconciled = None, _uncertain(settings, store, record, str(exc)), True
+        if result is not None:
+            if result.returncode != 0:
+                record.update(status="submit_failed", error=result.stderr.strip()[-2000:])
+                store.write(record)
+                if key:
+                    write_json(store.request_path(key), {"request_key": key, "submit_id": submit_id,
+                                                         "status": "failed", "updated_at": now_iso()})
+                raise MiyabiError("qsub_failed", "qsub rejected the job", returncode=result.returncode,
+                                  stdout=result.stdout[-2000:], stderr=result.stderr[-2000:], submit_id=submit_id)
+            job_id = parse_job_id(result.stdout)
+            if job_id is None:
+                job_id = _uncertain(settings, store, record, f"unparsable qsub output: {result.stdout[-500:]!r}")
+                reconciled = True
+            else:
+                bind_submission(settings, store, record, job_id)
+        joined = _join(settings, store, plan.get("notify"), job_id)
+    events = first_events(settings, store, job_id)
     from .notify import export_command
 
     response = ok(job_id=job_id, submit_id=submit_id, record=store.locator(job_id), output=output,
-                  events=events, checks=checks + live, export_command=export_command(settings, store.project_dir))
-    if plan.get("notify"):
-        from .notify import join
-
-        try:
-            response["notify"] = join(settings, store, plan["notify"], job_id)
-        except MiyabiError as exc:  # the job exists: report the notification problem, do not hide the job
-            response["notify_error"] = exc.to_dict()
-            response["warning"] = (f"job {job_id} was submitted WITHOUT a notification: {exc.message}. Nothing will "
-                                   f"tell you when it ends: create one with notify_create(job_ids=[\"{job_id}\"], ...) "
-                                   "and run its command, or follow the job with job_wait/job_get")
+                  events=events, checks=checks + live, export_command=export_command(settings, store.project_dir),
+                  **joined)
+    if reconciled:
+        response["reconciled"] = True
     return response
 
 
-def _uncertain(settings: Settings, store: Store, record: dict, reason: str) -> dict:
+def _uncertain(settings: Settings, store: Store, record: dict, reason: str) -> str:
+    """After a qsub whose result is unknown: the job found by its submit ID (now bound), or submit_uncertain."""
     record.update(status="submit_uncertain", error=reason)
     store.write(record)
     if record.get("request_key"):
@@ -642,9 +759,10 @@ def _uncertain(settings: Settings, store: Store, record: dict, reason: str) -> d
                     "updated_at": now_iso()})
     found = reconcile(settings, record)
     if found:
-        _bind(settings, store, record, found)
-        return ok(job_id=found, submit_id=record["submit_id"], reconciled=True, record=store.locator(found),
-                  events=_first_event(settings, store, found))
+        bind_submission(settings, store, record, found, reconciled=True)
+        return found
+    retry = ("call job_submit again with the same request_key before resubmitting" if record.get("request_key") else
+             f"if job_list later shows a job named {record['name']}, job_annotate(job_id=..., adopt=true) binds it "
+             "to this submission")
     raise MiyabiError("submit_uncertain", f"qsub result unknown ({reason}); no job carries this submit ID yet. "
-                      "Check again later with the same request_key before resubmitting",
-                      submit_id=record["submit_id"])
+                      f"Check again later: {retry}", submit_id=record["submit_id"])

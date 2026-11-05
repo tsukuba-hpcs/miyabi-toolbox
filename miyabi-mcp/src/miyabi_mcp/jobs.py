@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from collections import Counter
 from pathlib import Path
 
 from . import __version__, config, context, export, observe, parse, policy as policies, states
 from .config import Settings
-from .ledger import Store, host, index_append, index_owner, job_num, register_project
-from .pbs import Pbs
+from .ledger import Store, host, index_append, index_owner, index_owners, job_num, submit_lock
+from .pbs import Completed, Pbs
 from .util import MiyabiError, digest_json, hms_to_seconds, now_iso, ok, pbs_time, read_json, tail_text
 
 MAX_IDS = 40
 MAX_TAIL = 200
+# A job ID in a qdel error line, e.g. "qdel: Unknown Job Id 1234.opbs".
+QDEL_JOB_ID = re.compile(r"\b(\d+(?:\[\d*\])?)\.[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*")
 # The top-level fields of a job_list row (the qstat -ll columns plus finished, project and ledger).
 LIST_FIELDS = ("job_id", "job_name", "status", "project", "queue", "start_date", "elapsed_seconds", "token",
                "token_estimate", "nodes", "mig", "finished", "ledger")
@@ -117,11 +120,14 @@ def job_list(settings: Settings, args: dict) -> dict:
     if store is not None and args.get("refresh_ledger", True):
         observe.refresh(store, ledger_records, snap)
     jobs = []
+    owners = None
     for row in snap["jobs"]:
         job = dict(row, finished=False)
         record = store.find(row["job_id"]) if store else None
         job["ledger"] = _ledger_view(record)
-        job["project"] = str(settings.project_dir) if record else index_owner(settings, row["job_id"])
+        if record is None and owners is None:
+            owners = index_owners(settings)  # one pass over the user index, only when a row needs it
+        job["project"] = str(settings.project_dir) if record else (owners or {}).get(job_num(row["job_id"]))
         jobs.append(job)
     history = args.get("history")
     if history:
@@ -152,7 +158,7 @@ def job_list(settings: Settings, args: dict) -> dict:
     return result
 
 
-def _owner_record(settings: Settings, project_dir: str | None, job_id: str) -> dict | None:
+def _owner_record(project_dir: str | None, job_id: str) -> dict | None:
     if not project_dir:
         return None
     return read_json(Path(project_dir) / config.STATE_NAME / "jobs" / job_num(job_id) / "record.json")
@@ -185,7 +191,7 @@ def job_get(settings: Settings, args: dict) -> dict:
         owner = (str(settings.project_dir) if record else variables.get("MIYABI_PROJECT_DIR")
                  or index_owner(settings, job_id))
         if record is None and owner:
-            record = _owner_record(settings, owner, job_id)
+            record = _owner_record(owner, job_id)
         names = set((record or {}).get("submit", {}).get("env_names", []))
         entry = {"job_id": key or job_id, "active": job_num(job_id) in active, "found": fields is not None,
                  "project": owner, "ledger": _ledger_view(record),
@@ -253,11 +259,38 @@ def job_cancel(settings: Settings, args: dict) -> dict:
         if target["action"] == "qdel" and target["in_ledger"]:
             store.note(target["job_id"], "cancel_requested", "qdel requested", note=args["reason"])
     result = Pbs(settings).qdel(chosen)
+    refused = qdel_refused(result, chosen)
+    for job_id in refused:
+        if store.find(job_id):  # before the refresh below: its end must not count as cancelled by us
+            store.note(job_id, "cancel_failed", "qdel failed", note=result.stderr.strip()[-500:])
     snap = observe.snapshot(settings, max_age=0, force=True)
     records = [r for r in (store.find(i) for i in chosen) if r]
     events = observe.refresh(store, records, snap) if records else []
-    return ok(cancelled=chosen, targets=targets, events=events,
-              qdel={"returncode": result.returncode, "stdout": result.stdout[-2000:], "stderr": result.stderr[-2000:]})
+    active = {job_num(row["job_id"]) for row in snap["jobs"]}
+    for target in targets:
+        if target["action"] == "qdel":
+            still = job_num(target["job_id"]) in active
+            target["result"] = (("qdel_failed" if still else "ended_without_qdel") if target["job_id"] in refused
+                                else ("cancelling" if still else "cancelled"))
+    cancelled = [t["job_id"] for t in targets if t.get("result") in {"cancelled", "cancelling"}]
+    failed = [t["job_id"] for t in targets if t.get("result") == "qdel_failed"]
+    qdel = {"returncode": result.returncode, "stdout": result.stdout[-2000:], "stderr": result.stderr[-2000:]}
+    if failed and not cancelled:
+        raise MiyabiError("qdel_failed", f"qdel did not cancel {', '.join(failed)}; the jobs are still active",
+                          targets=targets, qdel=qdel, events=events)
+    response = ok(cancelled=cancelled, failed=failed, targets=targets, events=events, qdel=qdel)
+    if failed:
+        response["warning"] = f"qdel failed for {', '.join(failed)}: they are still active (see qdel.stderr)"
+    return response
+
+
+def qdel_refused(result: Completed, job_ids: list[str]) -> set[str]:
+    """The jobs of `job_ids` that qdel refused: those its error output names, or all when it names none."""
+    if result.returncode == 0:
+        return set()
+    named = {match.group(1) for match in QDEL_JOB_ID.finditer(result.stderr + result.stdout)}
+    refused = {job_id for job_id in job_ids if job_num(job_id) in named}
+    return refused or set(job_ids)
 
 
 # -- job_annotate -------------------------------------------------------------------------------------------------
@@ -274,9 +307,36 @@ def _adopt(settings: Settings, store: Store, job_id: str, args: dict) -> dict:
     key, fields = _match(details, job_id)
     if fields is None:
         raise MiyabiError("not_found", f"PBS does not know job {job_id}")
-    owner = parse.variable_list(fields.get("Variable_List")).get("MIYABI_PROJECT_DIR") or index_owner(settings, key)
-    if owner and owner != str(store.project_dir):
-        raise MiyabiError("owned_elsewhere", f"job {key} belongs to project {owner}")
+    variables = parse.variable_list(fields.get("Variable_List"))
+    # The user's submit lock makes the ownership check and the claim one step across projects: two projects
+    # adopting the same job at once would both pass the check.
+    with submit_lock(settings):
+        existing = store.find(key)
+        if existing:
+            return existing
+        owner = variables.get("MIYABI_PROJECT_DIR") or index_owner(settings, key)
+        if owner and owner != str(store.project_dir):
+            raise MiyabiError("owned_elsewhere", f"job {key} belongs to project {owner}")
+        pending = store.read_submission(variables["MIYABI_SUBMIT_ID"]) if variables.get("MIYABI_SUBMIT_ID") else None
+        if pending and not pending.get("job_id"):
+            # This project's own submission whose qsub result was unknown: bind it rather than adopt a copy.
+            from . import submit
+
+            submit.bind_submission(settings, store, pending, key, reconciled=True)
+            submit.first_events(settings, store, key)
+            return store.find(key)
+        record = _adopted_record(store, key, fields, args)
+        store.new_submission(record)
+        store.bind(record["submit_id"], key)
+        index_append(settings, {"type": "adopted", "job_id": key, "project_dir": str(store.project_dir),
+                                "submit_id": record["submit_id"], "name": record["name"]})
+    observation = states.from_detail(fields, history=history, cancel_requested=False,
+                                     mig_hardware=settings.config.get("mig_hardware"))
+    store.apply(key, observation, "qstat -H -f" if history else "qstat -f")
+    return store.find(key)
+
+
+def _adopted_record(store: Store, key: str, fields: dict, args: dict) -> dict:
     number = job_num(key)
     select = fields.get("Resource_List.select", "")
     walltime_s = hms_to_seconds(fields.get("Resource_List.walltime"))
@@ -294,22 +354,18 @@ def _adopt(settings: Settings, store: Store, job_id: str, args: dict) -> dict:
                    "submit_arguments": fields.get("Submit_arguments"),
                    "output": (fields.get("Output_Path") or "").split(":", 1)[-1] or None, "env_names": []},
     }
-    store.new_submission(record)
-    store.bind(record["submit_id"], key)
-    index_append(settings, {"type": "adopted", "job_id": key, "project_dir": str(store.project_dir),
-                            "submit_id": record["submit_id"], "name": record["name"]})
-    observation = states.from_detail(fields, history=history, cancel_requested=False,
-                                     mig_hardware=settings.config.get("mig_hardware"))
-    store.apply(key, observation, "qstat -H -f" if history else "qstat -f")
-    return store.find(key)
+    return record
 
 
 def job_annotate(settings: Settings, args: dict) -> dict:
     store = Store(settings)
-    register_project(settings)
     job_id = args.get("job_id")
     if not job_id:
         raise MiyabiError("invalid_arguments", "job_id is required")
+    verdict = args.get("verdict")
+    if verdict and verdict.get("status") not in VERDICTS:  # before adopting: a refused call changes nothing
+        raise MiyabiError("invalid_arguments", f"verdict.status must be one of {sorted(VERDICTS)}")
+    labels = args.get("labels") or {}
     record = store.find(job_id)
     adopted = False
     if record is None:
@@ -317,10 +373,6 @@ def job_annotate(settings: Settings, args: dict) -> dict:
             raise MiyabiError("not_in_ledger", f"job {job_id} is not in this project's ledger; pass adopt=true")
         record = _adopt(settings, store, job_id, args)
         adopted = True
-    verdict = args.get("verdict")
-    if verdict and verdict.get("status") not in VERDICTS:
-        raise MiyabiError("invalid_arguments", f"verdict.status must be one of {sorted(VERDICTS)}")
-    labels = args.get("labels") or {}
 
     def change(current: dict) -> None:
         current.setdefault("labels", {}).update(labels)
@@ -410,12 +462,12 @@ def _summary(records: list[dict], budget: dict | None, filtered: bool) -> dict:
 def ledger_query(settings: Settings, args: dict) -> dict:
     store = Store(settings)
     fmt = args.get("format", "records")
+    records = list(store.records())
     if args.get("refresh", True):
-        ledger_records = [r for r in store.records() if r.get("job_id")]
         snap = observe.snapshot(settings, max_age=settings.config["interactive_max_age_s"],
-                                newer_than=observe.accepted_after(ledger_records))
-        observe.refresh(store, ledger_records, snap)
-    records = [r for r in store.records() if _selected(r, args)]
+                                newer_than=observe.accepted_after(records))
+        records = observe.refreshed(store, records, snap)
+    records = [r for r in records if _selected(r, args)]
     if fmt == "records":
         return ok(project=str(store.project_dir), count=len(records), records=records)
     if fmt == "summary":

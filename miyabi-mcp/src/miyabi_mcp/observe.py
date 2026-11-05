@@ -28,6 +28,21 @@ def accepted_after(records) -> float:
     return max([float((r.get("submit") or {}).get("accepted_ts") or 0) for r in records] or [0.0])
 
 
+def _accepted_path(settings: Settings):
+    return settings.user_dir / "cache" / "accepted.json"
+
+
+def last_accepted(settings: Settings) -> float:
+    """When qsub last accepted a job of this user through miyabi-mcp, in any project (0 when unknown)."""
+    return float((read_json(_accepted_path(settings)) or {}).get("accepted_ts") or 0)
+
+
+def mark_accepted(settings: Settings, accepted_ts: float) -> None:
+    """Record a qsub acceptance (under the user's submit lock): later live checks need a newer table."""
+    write_json(_accepted_path(settings), {"accepted_ts": max(accepted_ts, last_accepted(settings)),
+                                          "at": now_iso()})
+
+
 def snapshot(settings: Settings, max_age: float, force: bool = False, newer_than: float = 0.0) -> dict:
     """The user's unfinished jobs, at most `max_age` seconds old (one shared `qstat -ll`).
 
@@ -101,6 +116,8 @@ def refresh(store: Store, records: list[dict], snap: dict) -> list[dict]:
             continue
         row = active.get(job_num(job_id))
         if row is not None:
+            if record.get("missing_since"):  # seen again: a later disappearance starts a new grace period
+                store.update(job_id, lambda current: current.pop("missing_since", None))
             seen = states.TABLE_CLASS.get(row["status"])
             if seen is None or seen != states.state_class(state):
                 detail_ids.append(job_id)
@@ -144,6 +161,12 @@ def refresh(store: Store, records: list[dict], snap: dict) -> list[dict]:
             if event:
                 events.append(event)
     return events
+
+
+def refreshed(store: Store, records: list[dict], snap: dict) -> list[dict]:
+    """`records` after bringing them up to date with PBS: the ones that changed are read again."""
+    changed = {event["job_id"] for event in refresh(store, records, snap)}
+    return [(store.find(r["job_id"]) or r) if r.get("job_id") in changed else r for r in records]
 
 
 def _missing_since(store: Store, job_id: str) -> datetime:

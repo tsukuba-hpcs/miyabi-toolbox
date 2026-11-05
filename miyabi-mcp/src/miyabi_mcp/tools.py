@@ -106,7 +106,9 @@ TOOLS = [
                              'cd -- "${PBS_O_WORKDIR:?}" || exit 1 after the #PBS lines.'},
                  "output": {**STR, "description": "Absolute PBS output path on /work."}, "join": STR,
                  "env": {"type": "object", "additionalProperties": {"type": "string"}},
-                 "depend": STR, "array": STR, "labels": LABELS, "client_ref": STR, "request_key": STR,
+                 "depend": STR, "array": {**STR, "description": "Not supported yet (the plan fails): submit separate "
+                                          "jobs with a notify group."},
+                 "labels": LABELS, "client_ref": STR, "request_key": STR,
                  "expected_seconds": {"type": "number"}, "note": STR,
                  "dry_run": {"type": "boolean", "default": True}, "plan_digest": STR,
                  "resubmit": {"type": "boolean"}, "allow_placeholders": {"type": "boolean"},

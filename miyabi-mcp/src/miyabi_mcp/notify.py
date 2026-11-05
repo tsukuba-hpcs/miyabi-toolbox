@@ -9,6 +9,7 @@ reported. daemon_info derives the daemon's state from it.
 
 from __future__ import annotations
 
+import shlex
 import time
 from collections import Counter
 from datetime import datetime, timedelta
@@ -17,10 +18,12 @@ from pathlib import Path
 from . import deliver as delivery, observe
 from .config import LAUNCHER, NOTIFY_POLL_SECONDS, STATE_NAME, Settings
 from .ledger import Store, host
-from .util import (Lock, MiyabiError, compact, now, now_iso, ok, parse_duration, read_json, seconds_to_hms, short_id,
-                   write_json)
+from .util import (Lock, MiyabiError, check_notifier, compact, now, now_iso, ok, parse_duration, read_json,
+                   seconds_to_hms, short_id, write_json)
 
 WHEN = {"all_ended", "any_ended", "started"}
+# Not closed yet. Only `open` ones collect jobs: a fired notification is never evaluated again, so a job
+# added to it would never be reported, and its name is free for a new group.
 OPEN = {"open", "fired"}
 CLOSED = {"delivered", "acknowledged", "cancelled", "dismissed", "failed"}
 # One-off messages sent while the group keeps waiting, and the notification field that records them.
@@ -39,16 +42,19 @@ def _path(state: Path, notification_id: str) -> Path:
 
 
 def _load(store: Store, key: str) -> dict:
-    """A notification by id, or by name among this project's open ones."""
+    """A notification by id, or by name: the open one of that name, else the latest fired one."""
     found = read_json(_path(store.state, key)) if key.startswith("N-") else None
     if found is None:
-        for item in _all(store.state):
-            if item.get("name") == key and item["status"] in OPEN:
-                found = item
-                break
+        found = _named(store.state, key, "open") or _named(store.state, key, "fired")
     if found is None:
         raise MiyabiError("not_found", f"no notification {key} in this project")
     return found
+
+
+def _named(state: Path, name: str, status: str) -> dict | None:
+    """The latest notification called `name` with this status (ids sort by creation time)."""
+    found = [n for n in _all(state) if name and n.get("name") == name and n["status"] == status]
+    return found[-1] if found else None
 
 
 def _all(state: Path) -> list[dict]:
@@ -92,23 +98,27 @@ def poll_seconds(settings: Settings) -> int:
 def export_command(settings: Settings, project_dir: Path | str, notifier: str | None = None) -> str:
     """A command for the agent's machine that prints this project's smooth-research JSONL (data never passes
     through the model). `notifier` names the agent's machine; on another machine the command goes over ssh."""
-    local = f"{LAUNCHER} --project-dir {project_dir} ledger --format smooth-research --jsonl"
+    local = shlex.join([str(LAUNCHER), "--project-dir", str(project_dir), "ledger", "--format", "smooth-research",
+                        "--jsonl"])
     notifier = notifier or settings.config.get("notifier")
     if not notifier or notifier == host():
         return local
-    return f"ssh -T -o BatchMode=yes {settings.config.get('remote_alias', 'miyabi-g')} {local}"
+    # ssh joins its arguments into one remote command line: `local` is quoted for that shell.
+    ssh = ["ssh", "-T", "-o", "BatchMode=yes", settings.config.get("remote_alias", "miyabi-g")]
+    return shlex.join(ssh) + " " + local
 
 
-def _command(settings: Settings, notifier: str, action: str) -> str:
+def _command(settings: Settings, notifier: str, action: list[str]) -> str:
     local = notifier == host()
     launcher = str(LAUNCHER) if local else settings.config.get("local_launcher", "miyabi-mcp")
-    remote = "" if local else (f" --remote {settings.config.get('remote_alias', 'miyabi-g')}"
-                               f" --remote-launcher {LAUNCHER}")
-    return f"{launcher} {action} --notifier {notifier} --poll-seconds {poll_seconds(settings)}{remote}"
+    remote = [] if local else ["--remote", settings.config.get("remote_alias", "miyabi-g"),
+                               "--remote-launcher", str(LAUNCHER)]
+    return shlex.join([launcher, *action, "--notifier", notifier, "--poll-seconds", str(poll_seconds(settings)),
+                       *remote])
 
 
 def listen_command(settings: Settings, notifier: str, notification_id: str) -> str:
-    return _command(settings, notifier, f"notify listen --id {notification_id}")
+    return _command(settings, notifier, ["notify", "listen", "--id", notification_id])
 
 
 def _beat_path(settings: Settings, notifier: str) -> Path:
@@ -154,7 +164,7 @@ def daemon_info(settings: Settings, notifier: str, notification_id: str | None =
     info = {"notifier": notifier, "state": state, "daemon_running": state == "running",
             "last_poll": beat.get("last_poll"), "last_ok": beat.get("last_ok"), "poll_seconds": configured,
             "daemon_poll_seconds": beat.get("interval_s"),
-            "start_command": _command(settings, notifier, "notifyd ensure")}
+            "start_command": _command(settings, notifier, ["notifyd", "ensure"])}
     if state in {"idle_exited", "stopped"}:
         info["exited"] = {k: beat["exited"].get(k) for k in ("at", "reason")}
     if beat.get("errors"):
@@ -209,7 +219,8 @@ def normalize_spec(settings: Settings, spec) -> dict:
             "early_failure": bool(spec.get("early_failure", True)),
             "timeout": parse_duration(spec["timeout"]) if spec.get("timeout") else None,
             "deliver": delivery.validate_shape(spec.get("deliver")), "message": spec.get("message") or "",
-            "notifier": spec.get("notifier") or default_notifier(settings), "labels": dict(sorted(labels.items()))}
+            "notifier": check_notifier(spec.get("notifier") or default_notifier(settings)),
+            "labels": dict(sorted(labels.items()))}
 
 
 def _new(settings: Settings, store: Store, args: dict, jobs: list[str], seal_now: bool = False) -> dict:
@@ -231,7 +242,7 @@ def _new(settings: Settings, store: Store, args: dict, jobs: list[str], seal_now
         "jobs": jobs, "expected": expected, "sealed": False, "when": when, "queue": queue, "deadline": deadline,
         "early_failure": bool(args.get("early_failure", True)), "early_sent": [], "unknown_sent": [],
         "deliver": delivery.validate_shape(args.get("deliver")),
-        "notifier": args.get("notifier") or default_notifier(settings),
+        "notifier": check_notifier(args.get("notifier") or default_notifier(settings)),
         "message": args.get("message") or "", "labels": args.get("labels") or {}, "status": "open",
         "ack_token": short_id(3), "outbox": [], "fired": None, "history": [{"at": now_iso(), "status": "open"}],
     }
@@ -264,15 +275,11 @@ def create(settings: Settings, args: dict) -> dict:
     store = Store(settings)
     if not (args.get("job_ids") or args.get("queue") or args.get("name") or args.get("timeout")):
         raise MiyabiError("invalid_arguments", "give job_ids, a queue, a timeout, or a name to fill later")
-    if args.get("name"):
-        try:
-            existing = _load(store, args["name"])
-        except MiyabiError:
-            existing = None
+    with store.lock("notify-names"):  # the name check and the creation together
+        existing = _named(store.state, args.get("name"), "open")
         if existing:
             raise MiyabiError("exists", f"notification {args['name']} is already open ({existing['id']}); use "
                               "notify_update to add jobs")
-    with store.lock("notify-names"):
         jobs = _ledger_ids(store, list(args.get("job_ids") or []))
         # An explicit job list is complete unless `expected` says more jobs will join.
         item = _new(settings, store, args, jobs, seal_now=bool(jobs) and args.get("expected") is None)
@@ -287,20 +294,23 @@ def join(settings: Settings, store: Store, spec: dict, job_id: str) -> dict:
     if not isinstance(spec, dict):
         raise MiyabiError("invalid_arguments", "notify must be an object")
     with store.lock("notify-names"):
-        item = None
-        if spec.get("name"):
-            item = next((n for n in _all(store.state) if n.get("name") == spec["name"] and n["status"] in OPEN), None)
+        item = _named(store.state, spec.get("name"), "open")
         created = item is None
         if created:
             # Without a name no other job can join: a notification for this job alone, sealed at once.
             item = _new(settings, store, {**spec, "job_ids": None}, [job_id],
                         seal_now=not spec.get("name") and spec.get("expected") is None)
         else:
-            if item["sealed"]:
+            if item["sealed"] and job_id not in item["jobs"]:
                 raise MiyabiError("sealed", f"notification {spec['name']} is sealed ({len(item['jobs'])} jobs); "
                                   "use a new name")
 
-            def add(current: dict) -> None:
+            def add(current: dict) -> None:  # under the notification's lock: it may have changed meanwhile
+                if job_id in current["jobs"]:
+                    return  # joined before: a retry
+                if current["status"] != "open" or current["sealed"]:
+                    raise MiyabiError("sealed", f"notification {spec['name']} was sealed or fired meanwhile "
+                                      f"({len(current['jobs'])} jobs); use a new name")
                 current["jobs"].append(job_id)
                 _seal_if_complete(current)
 
@@ -317,8 +327,9 @@ def update(settings: Settings, args: dict) -> dict:
     added = _ledger_ids(store, list(args.get("add_job_ids") or []))
 
     def change(current: dict) -> None:
-        if current["status"] not in OPEN:
-            raise MiyabiError("invalid_state", f"notification is {current['status']}")
+        if current["status"] != "open":
+            raise MiyabiError("invalid_state", f"notification is {current['status']}: only an open one takes jobs "
+                              "or changes; create a new one")
         if added and current["sealed"]:
             raise MiyabiError("sealed", "the notification is sealed")
         current["jobs"].extend(j for j in added if j not in current["jobs"])
@@ -450,7 +461,7 @@ def render(item: dict, reason: str, summary: list[dict], kind: str, export: str 
     return "\n".join(lines)
 
 
-def _evaluate(settings: Settings, store: Store, item: dict, records: dict) -> list[tuple]:
+def _evaluate(settings: Settings, item: dict, records: dict) -> list[tuple]:
     """New outbox messages for one open notification: the final one, or else one-off notices."""
     deadline_hit = bool(item.get("deadline")) and now() >= datetime.fromisoformat(item["deadline"])
     if item.get("queue"):
@@ -499,6 +510,7 @@ def poll(settings: Settings, notifier: str, caller: str | None = None, *, interv
     recorded first, and for an idle exit the usual evaluation follows, so a notification registered during
     the daemon's last poll is seen by it (it resumes) or by the daemon the agent starts next.
     """
+    check_notifier(notifier)
     started = now_iso()
     if exiting:
         _beat_update(settings, notifier, lambda beat: beat.update(
@@ -533,7 +545,7 @@ def poll(settings: Settings, notifier: str, caller: str | None = None, *, interv
                 records = {r["job_id"]: r for r in found if r}
             for item in items:
                 if item["status"] == "open":
-                    for kind, reason, summary in _evaluate(settings, store, item, records):
+                    for kind, reason, summary in _evaluate(settings, item, records):
                         _queue_message(store, item["id"], kind, reason, summary)
         except MiyabiError as exc:
             errors.append({"project": str(project), **exc.to_dict()})
@@ -612,7 +624,7 @@ def report(settings: Settings, msg_id: str, outcome: dict) -> dict:
 def check_spec(store: Store, spec: dict) -> tuple[str, str]:
     """A dry-run check of a normalized notify argument against the group's current state: (status, detail)."""
     if spec.get("name"):
-        current = next((n for n in _all(store.state) if n.get("name") == spec["name"] and n["status"] in OPEN), None)
+        current = _named(store.state, spec["name"], "open")
         if current and current["sealed"]:
             return "fail", f"notification {spec['name']} is sealed; use a new name"
         if current:

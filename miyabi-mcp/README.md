@@ -68,7 +68,7 @@ on a workstation.
 ## Policy
 
 `<project>/.miyabi-mcp/policy.json` limits what agents can submit in that project (unknown keys or wrong
-types stop all writes). Install one with `bin/miyabi-mcp --project-dir <dir> init --policy file.json`.
+types, including a file that holds `null` or a list instead of an object, stop all writes). Install one with `bin/miyabi-mcp --project-dir <dir> init --policy file.json`.
 
 ```json
 {
@@ -110,14 +110,14 @@ measurement); filtered by `labels` it gives one stage's use. The site's TOKEN st
 | `pbs_context` | plane, host, project and state directory, PBS projects, scheduled stop, effective policy |
 | `pbs_queues` | queue shapes and status (REMAIN_ELAPSE), project limits, occupancy, token budget |
 | `job_list`, `job_get` | jobs from one shared `qstat -ll` snapshot (`fields` picks top-level fields); details from `qstat [-H] -f`; output tails |
-| `job_submit` | dry run → checked plan + `plan_digest` (covering `notify`); same arguments + `dry_run=false` + digest → qsub; `notify` adds the job to a notification group |
+| `job_submit` | dry run → checked plan + `plan_digest` (covering `notify`); same arguments + `dry_run=false` + digest → qsub; `notify` adds the job to a notification group; a commit with a used `request_key` returns that job, even after its plan expired; array jobs (`array`, `#PBS -J`) are refused for now: submit the members separately with a notify group |
 | `interactive_plan` | checked interactive allocation plan → `launch_command` and pi-env-mcp `terminal_open` arguments; submission happens when that command runs in a PTY |
 | `allocation_check` | verify the calling shell's compute host, target architecture, nodefile and live PBS allocation; fails outside a confirmed running allocation |
-| `job_cancel` | dry run → targets + digest; commit with a reason → qdel |
+| `job_cancel` | dry run → targets + digest; commit with a reason → qdel; each target gets a `result` (`cancelled`, `cancelling`, `qdel_failed`, `ended_without_qdel`); error `qdel_failed` when nothing was cancelled |
 | `job_wait` | bounded wait (≤ 45 s) for short jobs; lists the notifications the jobs belong to |
 | `notify_create`, `notify_update`, `notify_list`, `notify_cancel`, `notify_ack` | notifications for job groups, a queue reopening, or a timeout; `notify_cancel` also dismisses a delivered, unacknowledged one |
 | `ledger_query` | records, summary (with `budget` when the policy sets one), events, or smooth-research observations; `export_command` prints them as JSONL |
-| `job_annotate` | labels, notes, application-level verdicts; `adopt` jobs submitted elsewhere |
+| `job_annotate` | labels, notes, application-level verdicts; `adopt` jobs submitted elsewhere (one project only: the check and the claim happen under the user-level submit lock), or a job whose qsub result was uncertain (it binds to that submission) |
 
 ## Batch job scripts
 
@@ -146,8 +146,8 @@ with 26 SMs, 24 GB each, and jobs have run on both 2g.24gb and 1g.24gb. Slices c
 BF16 results, so comparisons that must match bit for bit belong in one job; when the slice matters, record it
 inside the job (`nvidia-smi -L`). MIG plans carry this note as `plan.mig_slice`. Billing does not depend on
 the slice: batch MIG costs 0.25 token per instance-hour, and interactive MIG costs none. The ledger counts
-MIG use in `mig_instance_hours` labelled `GH200 MIG` (`mig_hardware` in the user-level `config.json`; the label
-is taken when a job is seen to end, and a running server reads the file only at start).
+MIG use in `mig_instance_hours` labelled `GH200 MIG` (the default of `mig_hardware` in the user-level
+`config.json`; the label is taken when a job is seen to end, and a running server reads the file only at start).
 
 ## Interactive compute allocations
 
@@ -243,12 +243,15 @@ A notification tells an agent that jobs ended, whether it is busy or idle. One n
  "notify": {"name": "E12-seeds", "expected": 3, "message": "all seeds done: run stats/aggregate.py"}}
 ```
 
-Jobs submitted with the same `name` join the group; it is sealed when `expected` jobs have joined (or with
-`notify_update(seal=true)`), and fires once when all of them have ended. The dry-run plan and its digest
+Jobs submitted with the same `name` join the group while it is open; it is sealed when `expected` jobs have
+joined (or with `notify_update(seal=true)`), and fires once when all of them have ended. A fired group takes no
+more jobs: a later job with that name starts a new group. The dry-run plan and its digest
 include the normalized `notify`. With `early_failure` (default on) a failing member is reported at once, and
 a member whose state turns unknown (PBS has lost track of it) is reported once; the group keeps waiting
 in both cases, and these interim messages need no acknowledgment. If the job is submitted but joining the
-notification fails, the result has `notify_error` and a `warning`: nothing will report that job.
+notification fails, the result has `notify_error` and a `warning`: nothing will report that job. A job whose
+qsub result was uncertain joins its notification when it is found, including on a retry with the same
+`request_key`.
 
 After every submission or `notify_create` that registers or joins a notification, run the command named in
 the result's `next`, even when a daemon seems to be running: it is idempotent and checks the daemon on your
@@ -268,7 +271,8 @@ wake, create two notifications for the group (different `name`, each with its ow
 inbox is first come, first served, not a broadcast.
 
 `notify listen` exits 0 after printing the message, 75 when the daemon cannot be kept running, and 3 when the
-notification is no longer open for that notifier. With 3 the text says why: it was cancelled; it was
+notification is no longer open for that notifier (judged only from a poll that began after the listener
+started). With 3 the text says why: it was cancelled; it was
 delivered and taken from this machine's inbox at a given time (delivered means written to the inbox, not
 read); or it belongs to another notifier (`notify_list` shows which).
 

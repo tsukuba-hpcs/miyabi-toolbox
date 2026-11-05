@@ -298,9 +298,9 @@ miyabi-mcp/
   submissions/<submit_id>/markers/    （v0.2）作业内标记，即作业里的 MIYABI_JOB_RECORD
   jobs/<num> -> ../submissions/<submit_id>   拿到作业号后创建的符号链接，按作业号查找
   logs/<name>-<stamp>-<id>.log        默认的 PBS 输出（-o），可在 project.json 或每次提交时改
-  events/<YYYY-MM>.jsonl              本项目所有作业的事件，只追加
+  events/<YYYY-MM>.jsonl              本项目所有作业的事件，只追加（写入事件月份与已有最新月份中较晚的那个文件）
   requests/<key-digest>.json          幂等键 → 作业（在项目内唯一）
-  plans/<plan>.json                   dry-run 计划（过期删除）
+  plans/<plan>.json                   dry-run 计划（10 分钟有效；超过 20 分钟的由之后的 dry-run 删除）
   notifications/<id>.json             通知：成员作业、封口、条件、投递状态
   locks/                              跨节点锁
 ```
@@ -314,6 +314,7 @@ miyabi-mcp/
 | `config.json` | 站点命令路径、远端别名、默认轮询间隔、具名投递命令、默认 `group` |
 | `policy.json` | 用户级默认上限 |
 | `cache/active.json` | 共享的 `qstat -ll` 快照。`qstat -ll` 返回该用户的全部作业，与项目无关；可随时删除 |
+| `cache/accepted.json` | 该用户最近一次 qsub 被接受的时间（任一项目）。提交的实时检查只用比它新的快照（8.3） |
 | `projects.json`、`index/`、`locks/submit` | 跨项目的项目登记、作业索引和提交锁（7.7） |
 | `notifiers/<名>.json` | 各 notifier（daemon）的心跳：最近一次 poll 的开始时间、最近一次无错误 poll 的时间、实际间隔、本轮 errors，以及 daemon 报告的退出（9.3） |
 | `notifyd/` | 在登录节点上运行的 daemon 的本机状态（9.3） |
@@ -385,7 +386,9 @@ miyabi-mcp/
  "usage": {"node_hours": 0.1725, "basis": "measured"}}
 ```
 
-`kind` 的取值：`submitted`、`queued`、`held`、`running`、`ended`、`cancel_requested`、`unknown`、`reconciled`、`annotated`。
+`kind` 的取值：`submitted`、`queued`、`held`、`running`、`ended`、`cancel_requested`、`cancel_failed`、`unknown`、`reconciled`、`annotated`。
+
+事件写入其 `observed_at` 所在月份的文件；已有更晚月份的文件时，写入最晚的那个。`events` 的游标是"文件 + 行数"，读者离开旧月份后不再回头，所以事件不能落进旧文件（登录节点之间的时钟偏差、跨月时等锁都会造成这种情况）。
 
 各类事件的来源：
 
@@ -434,7 +437,11 @@ miyabi-mcp/
 ### 7.6 锁与写入
 
 - **记录**：先写临时文件，再 `rename` 替换。Lustre 上 rename 是原子的，实验平台已经依赖这一点。
-- **锁**：用 `os.link` 创建锁文件，目标已存在就失败（实验平台在 /work 上跨计算节点验证过这种"不存在才创建"的语义）。锁文件里写主机、pid 和时间，超过租期视为失效，可以抢占。`fcntl.flock` 在 /work 上用过（goal-wakeup、平台的 controller.lock），但跨登录节点的行为没有验证，所以不依赖它。
+- **记录与事件的顺序**：在作业锁内先写占用新 `seq` 的记录，再追加事件；追加失败就把记录写回原样。反过来的顺序会重复事件 ID：事件已追加而记录没写成（/work 配额满时，小的追加仍可能成功，新建临时文件却失败），下一个事件就会沿用同一个 `seq`（11-05 审查时复现）。
+- **绑定作业号**：在作业锁内修改已存的记录，不用调用方手里的副本整体覆盖。作业号的链接一旦存在，别的进程就可能记事件，旧副本会把 `seq` 退回去；同一提交再绑定一次不改变任何东西，也不再补 `submitted` 事件。
+- **锁**：用 `os.link` 创建锁文件，目标已存在就失败（实验平台在 /work 上跨计算节点验证过这种"不存在才创建"的语义）。锁文件里写主机、pid 和时间；租期从取得锁时算起（取得后 `utime`，等锁的时间不占租期），超过租期视为失效，可以抢占。
+  - **guard。** 抢占（检查过期、再 rename 移走）、持锁超过半个租期后的释放，以及续期时核对持有者，都在第二把锁 `<名>.guard` 内进行。否则抢占者检查之后、rename 之前，旧持有者恰好释放、新调用方取得，rename 就会移走新锁，第三个调用方再取得，两方同时持锁（11-05 审查时复现）。刚取得不久的锁释放时不经 guard：抢占者不会认为它过期。guard 只持有片刻，自身不再加 guard。
+  - **续期与失锁。** 超过租期的持有者可能已被抢占。`renew` 在 guard 内核对锁仍属于自己并重置租期。提交在运行 qsub 之前续期，失败就不提交（`lock_lost`，记录标为 `submit_failed`，同一个键可以直接重试）；notifyd 每轮 poll 前续期，失败就退出（例如工作站休眠超过租期，新的 daemon 已接手），不写状态文件，也不报告退出。`fcntl.flock` 在 /work 上用过（goal-wakeup、平台的 controller.lock），但跨登录节点的行为没有验证，所以不依赖它。
 - **待验证**：状态都在 /work（Lustre）上。`os.link` 和 rename 的语义实验平台已在计算节点之间验证过，但还没在两台登录节点之间验证。M1 中实测：g1 和 g2 上各起一个进程，竞争同一把锁。
 - **不用 SQLite**：多个服务实例可能同时在几台登录节点（g1、g2、g3）上写。实验平台规避网络文件系统上的 SQLite 写入，也是同一个原因。
 
@@ -519,7 +526,7 @@ miyabi-mcp/
   "queue": "debug-g", "group": "<group>", "select": "1:mpiprocs=1", "walltime": "00:20:00",
   "name": "train-a",
   "workdir": "/work/<group>/<user>/proj",
-  "output": "/work/<group>/<user>/proj/logs/pbs/train-a-{stamp}.log",
+  "output": "/work/<group>/<user>/proj/logs/pbs/train-a.log",
   "env": {"SR_ATTEMPT_ID": "ATT-0003-1"},
   "labels": {"project": "proj", "agent": "worker-1"},
   "client_ref": "ATT-0003-1", "request_key": "sr:ATT-0003-1",
@@ -529,6 +536,8 @@ miyabi-mcp/
   "notify": {"name": "E12-seeds", "expected": 3, "message": "…"}
 }
 ```
+
+`output` 按字面使用，不展开占位符；不给时默认路径里带时间戳和 submit ID。
 
 **两阶段。** `dry_run: true`（默认）只校验并返回计划和 `plan_digest`。提交时传同样的参数，加上 `dry_run: false` 和该 `plan_digest`。服务端重新生成计划，比对摘要，并重新检查会变化的部分（上限、占用、维护）。这样保证提交的就是 agent 给用户看过的那份；在 Claude Code 的权限提示里，用户看到的也是完整参数。策略可以允许小作业省掉这一步（10.1）。
 
@@ -540,7 +549,8 @@ miyabi-mcp/
 - **项目组**：在用户的组中，且列在该队列的 PROJECT 里；未指定时，只有在唯一一个候选组时才自动选取。
 - **上限**：`--limit` 的 accepted 和 running 还有余量，并扣除保留槽位；按标签的并发；策略中的每作业上限、时间窗预算和项目总额 `budget`（10.1）。
 - **通知**（`notify`）：规范化后（补上默认值）放进计划和 `plan_digest`，所以同一个摘要下不能再换通知的目标、投递方式或分组；分组的当前状态（是否已封口）在 commit 时复核。
-- **脚本**：文件存在；`bash -n` 通过；没有残留的 `<...>` 占位符（尖括号内不含空格，所以 `python x.py <config.yaml >train.log`、`cat <<EOF >notes.txt` 这类重定向不算；注释照常检查，因为 `#PBS` 在 shell 看来也是注释；失败时报出行号和匹配到的文字，`allow_placeholders` 整体放行）；解析 `#PBS` 指令，报告与命令行选项的冲突（命令行优先）；脚本在 `/tmp` 或节点本地路径下时报警。
+- **脚本**：文件存在；`bash -n` 通过；没有残留的 `<...>` 占位符（尖括号内不含空格，所以 `python x.py <config.yaml >train.log`、`cat <<EOF >notes.txt` 这类重定向不算；注释照常检查，因为 `#PBS` 在 shell 看来也是注释；失败时报出行号和匹配到的文字，`allow_placeholders` 整体放行）；解析 `#PBS` 指令，报告被命令行覆盖的指令（命令行优先；只列命令行实际给出的选项：`-q`、`-N`、`-l select`、`-l walltime`、`-W group_list`，批处理另有 `-o`、`-j`，带 `depend` 时还有 `-W depend`）；脚本在 `/tmp` 或节点本地路径下时报警。
+- **数组作业**：暂不支持。`array` 参数或脚本中的 `#PBS -J` 都使计划失败：计划、时间窗、`budget` 和预留只会按一个子作业计算（`array="1-100"` 时少算 99 倍），用量、取消和通知也没有按子作业处理（11-05 审查）。需要多个成员时分别提交，用带 `expected` 的通知分组等待全部结束。
 - **工作目录**（`script.cwd`）：批处理作业从 `$HOME` 开始，`workdir` 只决定 `$PBS_O_WORKDIR`。脚本里（注释之外）没有 `cd` 或 `pushd` 时给 warn，附上示例 `cd -- "${PBS_O_WORKDIR:?}" || exit 1`（放在 `#PBS` 指令之后）。不自动往脚本里插 cd：插的位置不对会让后面的 `#PBS` 指令失效，提交的字节也不再是用户看过的脚本；也不做"cd 之前是否用了相对路径"的静态分析。
 - **工作目录与输出路径**：
   - `workdir`（qsub 的工作目录，即作业里的 `$PBS_O_WORKDIR`）默认是项目目录。作业本身从 `$HOME` 开始，脚本要自己 cd。
@@ -549,7 +559,7 @@ miyabi-mcp/
   - 父目录不存在时自动创建。
 - **环境变量**：变量名合法；值中的逗号和引号按 `qsub -v` 规则转义，无法安全转义时拒绝。
 - **依赖**：`depend` 允许，但会提醒（`afterok` 链曾经断过，建议改用通知的作业组）。交互分配走 `interactive_plan` + PTY 内的 `interactive-start`，不接受脚本、数组、依赖或批处理输出参数。
-- **重复**：`request_key` 已经使用过时直接返回原作业；有同名、同标签的活动作业时报警。
+- **重复**（`request_key`）：键已经提交过作业时，dry-run 给 warn 并写明作业号，不再判断实时上限（commit 不会提交）；commit 直接返回原作业，计划过期也一样。只是 warn 而不是 fail：用同一个键重试是查明中断的 commit 做了什么的安全办法，fail 会诱使 agent 换新键，提交出第二个作业。结果不确定的键也给 warn：commit 先对账，找不到作业时要 `resubmit: true`。键的作业已加入通知分组并使它封口时，dry-run 里 notify 的 fail 同样降为 warn（commit 返回原作业，不再加入）。（"有同名、同标签的活动作业时报警"尚未实现。）
 - **代码可变性**：PBS 只在提交时复制脚本，脚本引用的代码要到运行时才读。
   - 这次运行声明了要绑定到一个版本（带 `client_ref` 或 `labels.code_commit`），而 `workdir` 或脚本所在目录仍可写时，给出 warn，并说明补救办法：从只读快照运行（例如 `git archive` 到 `<project>/snapshots/<commit>` 后 `chmod -R a-w`），把 `workdir` 设为它。
   - 没有这种声明时（开发中的运行），只在 pass 里注明代码目录可写，避免每次都报警。
@@ -558,15 +568,15 @@ miyabi-mcp/
 
 **提交步骤：**
 
-1. 取得 `request_key` 的锁。若已有记录：有作业号就直接返回；记录停在 `submitting` 就先对账（见下）。
+1. 带 `request_key` 的 commit 先在用户级提交锁内查键，早于重新生成计划和核对摘要：已有作业号就直接返回原作业；记录停在 `submitting` 或 `uncertain` 就先对账（见下）。返回的作业若有 `submit.notify` 却还没加入通知（对账才找到它，或上一次调用在 qsub 之后中断），这时补上。进入提交锁后再查一次，防止同一个键的并发调用。
 2. 在 `submissions/<submit_id>/` 写记录（状态 `submitting`，含计划和新生成的 `submit_id`），并把脚本快照复制进去。
-3. 取得用户级提交锁，重新检查三层上限（7.7），然后以 argv 方式运行 `qsub`（不经 shell），超时 60 s。
+3. 取得用户级提交锁，重新检查三层上限（7.7），然后以 argv 方式运行 `qsub`（不经 shell），超时 60 s。实时检查用的 `qstat -ll` 快照必须晚于该用户最近一次 qsub 被接受的时间（`cache/accepted.json`，任一项目），否则重新查询：15 s 内的缓存看不到刚提交的作业，连续两次 commit 会一起越过 `max_active_jobs`、`label_limits` 和 `user.max_active_jobs`（11-05 审查时复现）。项目台账在这一步只读一遍。
    - `-v` 中加入 `MIYABI_SUBMIT_ID`、`MIYABI_CLIENT_REF`、`MIYABI_PROJECT_DIR`、`MIYABI_JOB_RECORD`，以及调用方的 `env`。
    - 提交的是快照。PBS 本来就在提交时复制脚本，所以运行语义不变，而记录中的摘要与实际提交的内容一致。
-4. 解析作业号（形如 `1234567.opbs`），写入记录，创建符号链接 `jobs/<num>`，在用户级索引中追加一行，再追加 `submitted` 事件（7.3），然后释放提交锁。
-5. 如果请求里带了 `notify`，用计划里规范化的 notify 把作业加入通知（9.2），并返回 daemon 状态和要运行的命令（8.6）。加入失败时作业已经存在，结果仍为 ok，但带 `notify_error` 和醒目的 `warning`：这次提交没有通知。
+4. 解析作业号（形如 `1234567.opbs`），创建符号链接 `jobs/<num>`，写入记录（`submit.indexed=false`），在用户级索引中追加一行，再把记录标为 `indexed=true`，最后才在幂等键文件里写入作业号；随后追加 `submitted` 事件（7.3），释放提交锁。键文件写入作业号之前中断的，用同一个键重试会补完这些步骤：用户级时间窗只读索引，漏写的作业永远不会被计入（11-05 审查时复现）。
+5. 如果请求里带了 `notify`，用计划里规范化的 notify 把作业加入通知（9.2），并返回 daemon 状态和要运行的命令（8.6）。加入在提交锁内进行，对账找到的作业同样加入；notify 规范也记入记录（`submit.notify`），供重试补加入用。加入失败时作业已经存在，结果仍为 ok，但带 `notify_error` 和醒目的 `warning`：这次提交没有通知。
 
-**对账。** qsub 超时或输出无法解析时，记录标为 `submit_uncertain`。随后用 `qstat -f` 查看同名候选作业的 `Variable_List`，找到同一个 `MIYABI_SUBMIT_ID` 就绑定。找不到时报告不确定，必须由调用方显式传 `resubmit: true` 才会再次提交。
+**对账。** qsub 超时或输出无法解析时，记录标为 `submit_uncertain`。随后用 `qstat -f` 查看同名候选作业的 `Variable_List`，找到同一个 `MIYABI_SUBMIT_ID` 就绑定。找不到时报告不确定，必须由调用方显式传 `resubmit: true` 才会再次提交。没有 `request_key` 时无从重试对账：作业之后出现的话，`job_annotate(adopt=true)` 按 `MIYABI_SUBMIT_ID` 把它绑定到这条提交记录，不另建 adopted 记录。
 
 **输出：** `job_id`、记录路径、输出日志路径、`observed_at`、`submitted` 事件，以及下一步提示（例如休眠的命令）。
 
@@ -599,12 +609,13 @@ runner 对可捕获的断开信号尝试取消自己的作业；终端不支持�
 - **输入**：`job_ids`（必须明确列出，不接受通配）、`reason`、`dry_run`（默认 true）、`allow_external`（默认 false）。也可以用 `label_selector` 按标签选择：dry-run 先解析出具体列表和摘要，执行时必须带上这个摘要。
 - **dry-run**：列出每个目标的当前状态，以及将要执行的操作。
 - **执行**：qdel，记录 `cancel_requested` 事件，然后对账。排队中的作业应变为"FINISH，从未开始"；运行中的作业的 Exit_status 要实测后记入 7.4。
+- **qdel 失败**：qdel 拒绝的作业（错误输出里点名的；一个都没点名时算全部）记 `cancel_failed` 事件，清掉 `cancel_requested` 标记，再对账；否则它之后因 walltime 或信号结束时会被记成 cancelled。每个目标给出 `result`：`cancelled`（已离开活动表）、`cancelling`（qdel 已接受，仍在表中）、`qdel_failed`、`ended_without_qdel`（qdel 报错时作业已经结束）。没有一个取消成功时返回错误 `qdel_failed`；部分失败时仍为 ok，`failed` 列出失败的作业并带 `warning`。（此前无论 qdel 退出码如何都报告 `cancelled`，11-05 审查时复现。）
 - **范围**：默认只取消本项目台账中的作业；作业是否属于本人由 qdel 保证。
 - `job_hold`、`job_release`（qhold、qrls）放到 v0.2，用于"暂时把资源让给别的实验"之类的场景。
 
 ### 8.5 台账类
 
-- **`job_annotate`**：修改标签、备注和应用层结论（`verdict`，附证据路径）。`adopt` 把外部提交的作业纳入台账：读 `qstat -f`，记录 `origin: adopted`。
+- **`job_annotate`**：修改标签、备注和应用层结论（`verdict`，附证据路径；先校验，校验失败不会接管）。`adopt` 把外部提交的作业纳入台账：读 `qstat -f`，记录 `origin: adopted`。作业带本项目一条结果不确定的提交的 `MIYABI_SUBMIT_ID` 时，改为绑定那条提交记录。归属检查和写入（记录、链接、索引）都在用户级提交锁内：两个项目同时接管同一个外部作业时只有一个成功，另一个得到 `owned_elsewhere`。
 - **`ledger_query`**：
   - 范围：默认是当前项目的台账；用 `project` 参数查询其他项目。
   - 过滤条件：标签、`client_ref`、时间范围、状态、结果。
@@ -656,14 +667,15 @@ Miyabi 登录节点（miyabi-mcp）                         agent 所在机器�
 - **判定在登录节点。** daemon 每次 poll，miyabi-mcp 用共享快照刷新这个 notifier 名下所有未完成通知涉及的作业（跨项目，每个用户约一次 `qstat -ll`），判定条件，返回已触发、尚未投递的消息。
 - **投递在 agent 所在机器。** daemon 在本机投递，再把结果报告回去。
 - **daemon 由 agent 启动。** 每次登记或加入通知后，agent 都运行返回的命令：`start_command`（`notifyd ensure`），或 listener 的 `listen_command`（它也会 ensure）。ensure 只看本机的状态文件和 pid，已在运行就直接返回，否则在后台启动，所以 agent 不以服务端报告的"在运行"为由跳过（11-05 定，D3）。没有未完成的通知时，daemon 再 poll 两次后报告退出并自行退出，不留常驻进程（9.3）。
-- **每台机器、每个用户一个 daemon。** 它的名字（notifier）默认是本机短主机名，服务端按名字分派通知。在登录节点上 daemon 直接调用 miyabi-mcp；在工作站上经 `ssh -o BatchMode=yes <alias> <launcher> notify poll …`，复用 ControlMaster。
+- **每台机器、每个用户一个 daemon。** 它的名字（notifier）默认是本机短主机名，服务端按名字分派通知。名字只能用字母、数字和 `_ . -`（不超过 64 个字符，首字符为字母或数字），因为它是两端的文件名，也出现在返回的命令里；返回的命令按 shell 规则加引号。在登录节点上 daemon 直接调用 miyabi-mcp；在工作站上经 `ssh -o BatchMode=yes <alias> <launcher> notify poll …`，复用 ControlMaster。
 - **频率。** 用户级 `config.json` 的 `notify_poll_seconds`（默认 180 s）是唯一来源：服务端把它写进返回的 `start_command` 和 `listen_command`（`--poll-seconds`），daemon 在心跳里报告实际间隔，与配置不一致时 `daemon_info` 标出来。已在运行的 daemon 保持原间隔，直到退出或 `notifyd stop`；ensure 不假装已经换了配置。间隔再短也意义有限：共享 qstat 快照最长用 60 s 前的（`poll_max_age_s`），作业提交后 120 s 内不查历史，poll 失败时还会退避。不按 walltime 自适应：walltime 只是上限，作业提前结束或失败时更需要及时报告。11-05 先定为 60 s（D4），此前是 300 s，实测检测延迟中位 192 s；同日改为 180 s，减少 qstat 调用。
 
 ### 9.2 通知与作业组
 
 - **一个通知可以绑定一组作业。** 条件满足时发一条汇总消息，列出每个作业的状态、Exit_status、用量和日志路径。例如多 seed 实验，等所有 seed 都结束后才通知。
 - **加入方式**：
-  - 提交时：`job_submit(notify={"name": …})`。同名通知不存在就创建，存在就加入。
+  - 提交时：`job_submit(notify={"name": …})`。同名的 open 通知不存在就创建，存在就加入。已 fired 的通知不再被判定，加进去的作业永远不会被报告，所以它不接收新作业，名字也让给新通知；`notify_update` 同样只改 open 的通知，按名字查找时先找 open 的，再找最近 fired 的。`notify_create` 的重名检查与创建在同一把锁内。
+  - 加入在该通知的锁内复查：查名字之后它可能已被封口或触发，这时拒绝加入（`sealed`），提交结果带 `notify_error` 和 warning。同一个作业再次加入（重试）不重复计入。
   - 事后：`notify_create(job_ids=[…])`，或 `notify_update(add_job_ids=[…])`。
 - **封口（sealed）。** 只有封口后的通知才会按 `all_ended` 触发，这样第一个 seed 结束时不会误报。
   - 给了 `expected` 时，成员数达到它就自动封口。
@@ -700,7 +712,7 @@ Miyabi 登录节点（miyabi-mcp）                         agent 所在机器�
 | `command` | 运行本机 daemon 配置中具名的命令，消息 JSON 从 stdin 传入 | 自定义 | — |
 | `file` | 追加到本机的一个文件 | 轮询或其他系统 | — |
 
-`notify listen` 的退出码：0 打印了消息；3 这个通知对该 notifier 已不再未完成，提示写明原因：已取消（时间）；已送达（时间。listener 投递的"已送达"只代表写进了收件目录，不代表 agent 看到了），本机收件目录显示它在某时被取走；或者不在这个 notifier 的名单里，请用 `notify_list` 查它属于哪个 notifier；75 daemon 无法维持。退出码不按原因细分，agent 读的是提示文字。
+`notify listen` 的退出码：0 打印了消息；3 这个通知对该 notifier 已不再未完成（判断依据是开始时间晚于 listener 启动的一次无错误 poll：在 poll 进行中登记的通知不在那次结果里，不能看结束时间），提示写明原因：已取消（时间）；已送达（时间。listener 投递的"已送达"只代表写进了收件目录，不代表 agent 看到了），本机收件目录显示它在某时被取走；或者不在这个 notifier 的名单里，请用 `notify_list` 查它属于哪个 notifier；75 daemon 无法维持。退出码不按原因细分，agent 读的是提示文字。
 
 `codex_queue` 和 `herdr` 仍待验证，验证之前不改默认投递方式。
 
@@ -732,6 +744,7 @@ open ─封口─▶ sealed ─条件满足或超时─▶ fired ─投递─▶
 
 - 投递至少一次，agent 用 ack token 去重。
 - 投递失败（例如 herdr 一直 blocked）超过 5 次就标为 failed，并在 `notify_list` 中显示原因。
+- 一次投递的结果分四种：`delivered`；`uncertain`（程序已经运行但超时，可能已送达，按已送达处理，避免重复打扰）；`retry`（例如磁盘满，什么也没送出）；`failed`（找不到程序或没有权限：什么也没送出，重试也没用，通知立即标为 failed）。此前所有 OSError 都算 uncertain，投递程序不存在时最终消息被标成 delivered，不再重试（11-05 审查时复现）。
 - 提前失败和状态不明的消息不改变组通知的状态。
 - 已送达却没人确认的通知（例如没人运行 `listen_command`，消息从没被读），用 `notify_cancel` 关成 `dismissed`：不需要 token，也不算确认；8.6 的 token 规则不变，dismissed 之后仍可凭 token ack（11-05 定，D6）。job_wait 只列出通知和收尾方法，不返回 token。
 
@@ -766,11 +779,13 @@ open ─封口─▶ sealed ─条件满足或超时─▶ fired ─投递─▶
   "label_limits": {"agent": {"max_active_jobs": 6}},
   "budget_windows": [{"window": "24h", "max_requested_node_hours": 200}],
   "require_plan": true,
-  "auto_commit_below_node_hours": 0.5,
+  "auto_commit_below_unit_hours": 0.5,
   "maintenance": "refuse_if_crossing",
   "cancel_scope": "project"
 }
 ```
+
+策略文件不存在时按空策略处理；存在但顶层不是对象（`null`、`[]`、`0` 等）时报 `invalid_policy`，与其他类型错误一样拦住所有写入，不当作"没有限制"。
 
 用户级目录中的 `policy.json` 有两个作用：给各项目提供默认值，并设定用户在所有项目上的合计上限（活动作业数、时间窗内的 node·h）。项目 `.miyabi-mcp/policy.json` 设定本项目的份额和每作业上限。三层上限（组、用户、项目）的检查顺序见 7.7。
 
@@ -866,7 +881,7 @@ open ─封口─▶ sealed ─条件满足或超时─▶ fired ─投递─▶
 
   - `source_ref` 写计算依据，格式固定为 `"resources_used.walltime=00:10:17 x nvnodes-g=1"`（MIG 为 `nvnodes-mig=<n>`）。`quantity` 用事件里存下的 6 位小数值（7.3）。smooth-research 按规范化 JSON 比较内容，值必须完全相同。
   - smooth-research 遇到同一个 `accounting_ref` 出现不同数值会报 CONFLICT，所以 TOKEN 必须用不同的 ref。
-  - MIG 的 `hardware` 字符串一改，累计就会分裂，所以不轻易改。它写在用户级 `config.json` 的 `mig_hardware` 里，在作业被观测到结束时读取，每个作业只有这一次带 usage 的事件，所以改配置只影响改动之后结束的作业，同一个 `accounting_ref` 不会出现两种内容。10-30 的实测作业里 `nvidia-smi -L` 显示 "NVIDIA GH200 120GB" 上的 `MIG 2g.24gb`，当时定为 `"GH200 MIG 2g.24gb"`。后来查明切片由 PBS 分配，1g.24gb 也会出现，而计费与切片无关（7.5），这个标签会让读账本的人以为所有作业都在 2g 上，所以 11-05 改为 `"GH200 MIG"`，不写规格（D2）。代价是跨越改动的项目在 smooth-research 里多一行 MIG 累计，两行只有 hardware 不同，可以直接相加。以后实现 reconciled 更正时，要沿用原事件的标签。MCP 服务只在启动时读一次配置，已在运行的服务要重启后才用新标签；登录节点上的 notifyd 每次 poll 都重新读取。
+  - MIG 的 `hardware` 字符串一改，累计就会分裂，所以不轻易改。它写在用户级 `config.json` 的 `mig_hardware` 里（默认值 `"GH200 MIG"`；此前没有默认值，config 里不写时标签为 null），在作业被观测到结束时读取，每个作业只有这一次带 usage 的事件，所以改配置只影响改动之后结束的作业，同一个 `accounting_ref` 不会出现两种内容。10-30 的实测作业里 `nvidia-smi -L` 显示 "NVIDIA GH200 120GB" 上的 `MIG 2g.24gb`，当时定为 `"GH200 MIG 2g.24gb"`。后来查明切片由 PBS 分配，1g.24gb 也会出现，而计费与切片无关（7.5），这个标签会让读账本的人以为所有作业都在 2g 上，所以 11-05 改为 `"GH200 MIG"`，不写规格（D2）。代价是跨越改动的项目在 smooth-research 里多一行 MIG 累计，两行只有 hardware 不同，可以直接相加。以后实现 reconciled 更正时，要沿用原事件的标签。MCP 服务只在启动时读一次配置，已在运行的服务要重启后才用新标签；登录节点上的 notifyd 每次 poll 都重新读取。
 - **摘要格式。** 用 `blake2b:<hex>`，`digest_size=32`，与 smooth-research 一致；项目规则不允许 SHA-256。
 - **契约样例。** smooth-research 仓库的 `tests/fixtures/miyabi_mcp_export.jsonl`（commit 9398c63，已按 7.3 对齐）按本节，用一个真实作业的 `qstat -H -f` 生成，是 M2 导出的对照基准。字段有出入时以本设计为准，并通知对方修改样例。
 

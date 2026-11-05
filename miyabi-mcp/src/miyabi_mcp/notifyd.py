@@ -23,7 +23,7 @@ from pathlib import Path
 from . import config, deliver as delivery
 from .config import LAUNCHER
 from .context import identify_host
-from .util import Lock, MiyabiError, compact, now, now_iso, ok, read_json, write_json
+from .util import Lock, MiyabiError, check_notifier, compact, now, now_iso, ok, read_json, write_json
 
 DEFAULT_POLL_SECONDS = config.NOTIFY_POLL_SECONDS
 INBOX_KEEP_S = 7 * 86400   # an inbox is removed this long after its notification was acknowledged or closed
@@ -40,6 +40,9 @@ class Options:
     idle_polls: int = 2
     fail_notify_after: int = 3
     started_by: str = "run"              # ensure, listen or run: recorded when the daemon starts
+
+    def __post_init__(self) -> None:
+        check_notifier(self.notifier)
 
     def argv(self) -> list[str]:
         argv = ["--notifier", self.notifier, "--poll-seconds", str(self.poll_seconds),
@@ -298,7 +301,11 @@ def run(opts: Options) -> int:
             if stopping["flag"] or paths["stop"].exists():
                 reason = "stopped"
                 break
+            if not lock.renew():  # e.g. this machine slept past the lease and a newer daemon took over
+                reason = "lost_lock"
+                break
             try:
+                poll_started = now_iso()
                 result = poll(opts, instance)
                 failures = 0
                 for message in result.get("messages", []):
@@ -347,7 +354,9 @@ def run(opts: Options) -> int:
                 state.update(last_poll_at=now_iso(), failures=0, last_error=None, open=result.get("open_count"),
                              errors=len(errors), polls=state.get("polls", 0) + 1)
                 if not errors:
-                    state["last_ok_at"] = now_iso()
+                    # A listener compares its own start with when this poll began: a notification created
+                    # while the poll was under way is not in `known` yet, however late the poll ended.
+                    state.update(last_ok_at=now_iso(), last_ok_started_at=poll_started)
                 if idle >= opts.idle_polls:
                     if _hand_over(opts, paths, lock, state, instance):
                         reason = "idle"
@@ -360,7 +369,8 @@ def run(opts: Options) -> int:
             while time.monotonic() < end and not stopping["flag"] and not paths["stop"].exists():
                 time.sleep(min(1.0, max(0.0, end - time.monotonic())))
                 if time.monotonic() - touched > 30:
-                    os.utime(lock.path)
+                    if not lock.renew():
+                        break  # the check before the next poll ends this daemon
                     touched = time.monotonic()
     except KeyboardInterrupt:
         reason = "stopped"
@@ -373,7 +383,7 @@ def run(opts: Options) -> int:
             paths["stop"].unlink(missing_ok=True)
             lock.release()
         _log(paths, event="exited", reason=reason, last_ok_at=state.get("last_ok_at"), handed_over=not holding)
-        if reason != "idle":  # an idle exit was reported by _hand_over
+        if reason not in {"idle", "lost_lock"}:  # _hand_over reported an idle exit; the new daemon runs now
             try:
                 poll(opts, instance, exiting=reason)
             except TRANSIENT as exc:
@@ -441,8 +451,8 @@ def listen(notification_id: str, opts: Options) -> int:
         if time.monotonic() - last_check > 60:
             last_check = time.monotonic()
             state = read_json(paths["state"]) or {}
-            polled_after = bool(state.get("last_ok_at")) and \
-                datetime.fromisoformat(state["last_ok_at"]).timestamp() > started
+            polled_after = bool(state.get("last_ok_started_at")) and \
+                datetime.fromisoformat(state["last_ok_started_at"]).timestamp() > started
             known = read_json(paths["known"], {}) or {}
             if polled_after and notification_id not in known and not any(box.glob("*.json")):
                 print(_gone(notification_id, opts, paths, box), flush=True)

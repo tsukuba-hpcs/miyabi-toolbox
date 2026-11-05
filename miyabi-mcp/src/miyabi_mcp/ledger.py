@@ -6,6 +6,7 @@ interleave across login nodes holds a Lock. Ended jobs are final: only a `reconc
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import socket
@@ -100,8 +101,13 @@ class Store:
 
     # -- events -----------------------------------------------------------------------------------------------
     def _append_event(self, event: dict) -> None:
+        """Append to the month of the event, or to the newest month file if that is later: a reader's cursor
+        has left older files, so an event written into one (clock skew between login nodes, or a month
+        turning while the event waited for the lock) would never reach it."""
         with self.lock("events", lease=60):
-            append_line(self.state / "events" / f"{month(event['observed_at'])}.jsonl", compact(event))
+            directory = self.state / "events"
+            newest = max((path.stem for path in directory.glob("*.jsonl")), default="")
+            append_line(directory / f"{max(month(event['observed_at']), newest)}.jsonl", compact(event))
 
     def apply(self, job_id: str, observation: dict, source: str, *, correction_of: str | None = None,
               note: str | None = None) -> dict | None:
@@ -135,7 +141,7 @@ class Store:
             if correction_of:
                 event["correction_of"] = correction_of
                 event["note"] = note
-            self._append_event(event)
+            before = copy.deepcopy(record)
             record["seq"] = seq
             record["state"] = {key: event.get(key) for key in STATE_KEYS}
             # Where the job ran, raw: a later observation without these fields keeps the earlier values.
@@ -146,7 +152,7 @@ class Store:
                 record["usage"] = event["usage"]
             if event.get("token") is not None:
                 record["token_reported"] = event["token"]
-            self.write(record)
+            self._commit(record, before, event)
         if event["execution_state"] == "ended":
             index_append(self.settings, {"type": "ended", "job_id": job_id, "project_dir": str(self.project_dir),
                                          "outcome": event["outcome"], "usage": event.get("usage"),
@@ -154,7 +160,10 @@ class Store:
         return event
 
     def note(self, job_id: str, kind: str, raw_state: str, **extra: Any) -> dict:
-        """A non-state event (cancel_requested, annotated): it consumes a seq but changes no state."""
+        """A non-state event (cancel_requested, cancel_failed, annotated): it consumes a seq but changes no state.
+
+        cancel_requested makes a later signal exit count as cancelled; cancel_failed (qdel refused) undoes that.
+        """
         with self.lock(f"job-{job_num(job_id)}"):
             record = self.find(job_id)
             if record is None:
@@ -166,12 +175,26 @@ class Store:
                      "execution_state": last.get("execution_state", "unknown"),
                      "outcome": last.get("outcome", "unknown"), "raw_state": raw_state,
                      "locator": self.locator(job_id), **extra}
-            self._append_event(event)
+            before = copy.deepcopy(record)
             record["seq"] = seq
-            if kind == "cancel_requested":
-                record["cancel_requested"] = True
-            self.write(record)
+            if kind in {"cancel_requested", "cancel_failed"}:
+                record["cancel_requested"] = kind == "cancel_requested"
+            self._commit(record, before, event)
             return event
+
+    def _commit(self, record: dict, before: dict, event: dict) -> None:
+        """Write the record that takes `seq`, then append its event (job lock held).
+
+        The other order repeats an event ID: once the event is appended, a failed record write (a full /work
+        quota still lets a small append through) leaves `seq` behind and the next event reuses it. If the
+        append fails, the record is put back, so it never claims an event the log lacks.
+        """
+        self.write(record)
+        try:
+            self._append_event(event)
+        except BaseException:
+            self.write(before)
+            raise
 
     def events(self, cursor: str | None = None, limit: int | None = None) -> tuple[list[dict], str | None]:
         """Events in append order from `cursor` ("YYYY-MM:<lines consumed>")."""
@@ -241,6 +264,15 @@ def index_owner(settings: Settings, job_id: str) -> str | None:
         if entry.get("type") in {"submitted", "adopted"} and job_num(entry.get("job_id", "")) == number:
             return entry.get("project_dir")
     return None
+
+
+def index_owners(settings: Settings) -> dict[str, str]:
+    """Job number -> owning project directory for every job in the user index, in one pass (newest wins)."""
+    owners: dict[str, str] = {}
+    for entry in index_entries(settings):
+        if entry.get("type") in {"submitted", "adopted"} and entry.get("job_id") and entry.get("project_dir"):
+            owners.setdefault(job_num(entry["job_id"]), entry["project_dir"])
+    return owners
 
 
 def new_submit_id() -> str:

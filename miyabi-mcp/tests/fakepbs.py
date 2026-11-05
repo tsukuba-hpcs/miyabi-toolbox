@@ -204,6 +204,10 @@ def qdel(args):
             print(f"qdel: Unknown Job Id {job_id}", file=sys.stderr)
             code = 1
             continue
+        if number in state.get("qdel_refuse", []):  # e.g. a job PBS will not let this user delete
+            print(f"qdel: Unauthorized Request  {job_id}", file=sys.stderr)
+            code = 159
+            continue
         if job.get("stime"):
             job.update(state="F", exit_status=271, obittime=time.time(), used=job.get("used") or "00:00:20")
         else:

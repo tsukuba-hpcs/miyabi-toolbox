@@ -1,15 +1,19 @@
 """Submit, observe, cancel, adopt and export through the tool layer against the fake PBS."""
 
 import json
+import os
 import subprocess
+import tempfile
+import threading
 import time
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from base import ROOT, FakePbsCase
-from miyabi_mcp import export
+from miyabi_mcp import export, jobs
 from miyabi_mcp.ledger import Store
-from miyabi_mcp.util import MiyabiError, canonical
+from miyabi_mcp.util import Lock, MiyabiError, canonical
 
 LAUNCHER = ROOT / "bin" / "miyabi-mcp"
 WITH_CD = '#!/bin/bash\n#PBS -j oe\ncd -- "${PBS_O_WORKDIR:?}" || exit 1\n'
@@ -153,6 +157,20 @@ class SubmitCheckTests(FakePbsCase):
         self.assertIn("accepts 1, 2 or 4 MIG instances, not 3", self.check(three, "queue.shape")["detail"])
         self.assertNotIn("mig_slice", self.plan()["plan"])
 
+    def test_array_jobs_are_refused(self):
+        self.assertEqual(self.check(self.plan(array="1-100"), "array")["status"], "fail")
+        self.script.write_text("#!/bin/bash\n#PBS -J 1-100\n#PBS -r y\necho $PBS_ARRAY_INDEX\n")
+        plan = self.plan()
+        self.assertFalse(plan["valid"])
+        self.assertEqual(self.check(plan, "array")["status"], "fail")
+        self.assertNotIn("script.directives", {c["id"] for c in plan["checks"]})  # nothing overrides -J or -r
+
+    def test_only_what_the_command_line_sets_is_reported_as_overridden(self):
+        self.script.write_text("#!/bin/bash\n#PBS -l walltime=01:00:00\n#PBS -m abe\necho hi\n")
+        detail = self.check(self.plan(), "script.directives")["detail"]
+        self.assertIn("-l walltime", detail)
+        self.assertNotIn("-m", detail)
+
     def test_select_resources(self):
         vnode = self.plan(queue="debug-mig", select="1:mpiprocs=1:vnode=mg1112_mig3")
         self.assertFalse(vnode["valid"])
@@ -245,6 +263,16 @@ class PolicyTests(FakePbsCase):
         state = self.project / ".miyabi-mcp"
         state.mkdir(exist_ok=True)
         (state / "policy.json").write_text(json.dumps(policy))
+
+    def test_a_policy_that_is_not_an_object_is_refused(self):
+        state = self.project / ".miyabi-mcp"
+        state.mkdir(exist_ok=True)
+        args = {"script": str(self.script), "queue": "debug-g", "walltime": "00:10:00"}
+        for text in ("null", "[]", "0", '""'):
+            (state / "policy.json").write_text(text)
+            self.assertEqual(self.call("job_submit", args)["error"]["type"], "invalid_policy", text)
+        (state / "policy.json").unlink()
+        self.assertTrue(self.ok_call("job_submit", args)["valid"])
 
     def test_mig_budget_window(self):
         self.write_policy({"queues": ["debug-mig"], "per_job": {"max_mig_instances": 1, "max_walltime": "00:10:00"},
@@ -419,6 +447,33 @@ class LifecycleTests(FakePbsCase):
         plan = self.ok_call("job_cancel", {"job_ids": ["3700000"]})
         self.assertEqual(plan["targets"][0]["action"], "qdel")
 
+    def test_two_projects_cannot_both_adopt_a_job(self):
+        state = self.read_state()
+        state["jobs"]["3700000"] = {"name": "ext", "state": "Q", "queue": "debug-g", "route": "debug-g",
+                                    "project": "gtest", "select": "1:mpiprocs=1", "units": 1, "mig": False,
+                                    "walltime": "00:10:00", "qtime": 1793300000, "stime": None, "obittime": None,
+                                    "exit_status": None, "used": None, "output": "/work/x.log", "variables": {},
+                                    "submit_args": "-q debug-g ext.pbs"}
+        self.write_state(state)
+        other = self.user_root / "other"
+        other.mkdir()
+        real, race = jobs.index_owner, {}
+
+        def owner_then_race(settings, key):  # the other project adopts while this one decides
+            if not race:
+                race["thread"] = threading.Thread(target=lambda: race.update(other=self.call(
+                    "job_annotate", {"job_id": "3700000", "adopt": True}, project_dir=other)))
+                race["thread"].start()
+                time.sleep(0.5)
+            return real(settings, key)
+
+        with mock.patch.object(jobs, "index_owner", owner_then_race):
+            mine = self.ok_call("job_annotate", {"job_id": "3700000", "adopt": True})
+        race["thread"].join(60)
+        self.assertTrue(mine["adopted"])
+        self.assertEqual(race["other"]["error"]["type"], "owned_elsewhere")
+        self.assertEqual(self.ok_call("ledger_query", project_dir=other)["records"], [])
+
     def test_other_projects_find_the_owner(self):
         job_id = self.submit()["job_id"]
         other = self.user_root / "other"
@@ -483,6 +538,389 @@ class PlacementAndExportTests(FakePbsCase):
         self.assertEqual(plain.stderr, "")  # no cursor unless asked for
         self.assertEqual([json.loads(line) for line in plain.stdout.splitlines()], observations)
         self.assertEqual(plain.stdout, "".join(canonical(o) + "\n" for o in observations))
+
+
+class LiveLimitTests(FakePbsCase):
+    """The live checks of a commit see the jobs accepted just before it (a cached table would not)."""
+
+    def plans(self, *names: str) -> list[tuple[dict, dict]]:
+        result = []
+        for name in names:
+            args = {"script": str(self.script), "queue": "debug-g", "walltime": "00:10:00", "name": name}
+            plan = self.ok_call("job_submit", args)
+            self.assertTrue(plan["valid"], plan["checks"])
+            result.append((args, plan))
+        return result
+
+    def commit(self, args: dict, plan: dict) -> dict:
+        return self.call("job_submit", {**args, "dry_run": False, "plan_digest": plan["plan_digest"]})
+
+    def active(self) -> int:
+        return sum(1 for job in self.read_state()["jobs"].values() if job["state"] != "F")
+
+    def test_back_to_back_commits_respect_max_active_jobs(self):
+        (self.project / ".miyabi-mcp").mkdir(exist_ok=True)
+        (self.project / ".miyabi-mcp" / "policy.json").write_text(json.dumps(
+            {"max_active_jobs": 1, "label_limits": {"agent": {"max_active_jobs": 1}}}))
+        (first, first_plan), (second, second_plan) = self.plans("a", "b")
+        self.assertTrue(self.commit(first, first_plan)["ok"])
+        refused = self.commit(second, second_plan)  # within 15 s: the cached table predates the first job
+        self.assertEqual(refused["error"]["type"], "plan_rejected")
+        self.assertIn("policy.max_active_jobs", {c["id"] for c in refused["error"]["checks"] if c["status"] == "fail"})
+        self.assertEqual(self.active(), 1)
+        again = self.ok_call("job_submit", second)  # a dry run now sees the job as well
+        self.assertFalse(again["valid"])
+
+    def test_user_cap_counts_jobs_of_other_projects(self):
+        (self.user_root / ".miyabi-mcp" / "policy.json").write_text(json.dumps({"user": {"max_active_jobs": 1}}))
+        other = self.user_root / "other"
+        other.mkdir()
+        (args, plan), = self.plans("a")
+        other_args = {"script": str(self.script), "queue": "debug-g", "walltime": "00:10:00", "name": "o"}
+        other_plan = self.ok_call("job_submit", other_args, project_dir=other)
+        self.assertTrue(other_plan["valid"])
+        self.assertTrue(self.commit(args, plan)["ok"])
+        refused = self.call("job_submit", {**other_args, "dry_run": False, "plan_digest": other_plan["plan_digest"]},
+                            project_dir=other)
+        self.assertIn("user.max_active_jobs", {c["id"] for c in refused["error"]["checks"] if c["status"] == "fail"})
+        self.assertEqual(self.active(), 1)
+
+
+class RequestKeyTests(FakePbsCase):
+    def args(self, **extra) -> dict:
+        return {"script": str(self.script), "queue": "debug-g", "walltime": "00:10:00", "name": "k", **extra}
+
+    def expire_plans(self) -> None:
+        for path in (self.project / ".miyabi-mcp" / "plans").glob("*.json"):
+            data = json.loads(path.read_text())
+            data["created_at"] = "2000-01-01T00:00:00+09:00"
+            path.write_text(json.dumps(data))
+
+    def test_a_retry_after_the_plan_expired_returns_the_job(self):
+        args = self.args(request_key="key-1")
+        plan = self.ok_call("job_submit", args)
+        first = self.ok_call("job_submit", {**args, "dry_run": False, "plan_digest": plan["plan_digest"]})
+        self.expire_plans()
+        again = self.ok_call("job_submit", {**args, "dry_run": False, "plan_digest": plan["plan_digest"]})
+        self.assertTrue(again["idempotent"])
+        self.assertEqual(again["job_id"], first["job_id"])
+        self.assertEqual(len(self.read_state()["jobs"]), 1)
+
+    def test_a_dry_run_names_the_job_of_a_used_key(self):
+        (self.project / ".miyabi-mcp").mkdir(exist_ok=True)
+        (self.project / ".miyabi-mcp" / "policy.json").write_text(json.dumps({"max_active_jobs": 1}))
+        job_id = self.submit(**self.args(request_key="key-2"))["job_id"]
+        dry = self.ok_call("job_submit", self.args(request_key="key-2"))
+        check = next(c for c in dry["checks"] if c["id"] == "request_key")
+        self.assertEqual(check["status"], "warn")
+        self.assertIn(job_id, check["detail"])
+        self.assertTrue(dry["valid"])  # live limits are not judged for a commit that submits nothing
+        fresh = self.ok_call("job_submit", self.args(request_key="key-3"))
+        self.assertEqual(next(c for c in fresh["checks"] if c["id"] == "request_key")["status"], "pass")
+        self.assertFalse(fresh["valid"])  # a new key would submit a second job: max_active_jobs applies
+
+    def test_a_reconciled_submission_joins_its_notification(self):
+        state = self.read_state()
+        state["qsub_mode"] = "garbage"
+        self.write_state(state)
+        result = self.submit(**self.args(notify={"name": "grp", "notifier": "box"}))
+        self.assertTrue(result["reconciled"])
+        self.assertEqual(result["notify"]["notification"]["jobs"], [result["job_id"]])
+        self.assertIn("export_command", result)
+
+    def test_a_retry_joins_the_notification_the_first_call_missed(self):
+        state = self.read_state()
+        state["qsub_mode"] = "garbage"
+        self.write_state(state)
+        args = self.args(request_key="key-4", notify={"name": "grp", "notifier": "box"})
+        plan = self.ok_call("job_submit", args)
+        with mock.patch("miyabi_mcp.submit.reconcile", return_value=None):  # the job is not visible yet
+            uncertain = self.call("job_submit", {**args, "dry_run": False, "plan_digest": plan["plan_digest"]})
+        self.assertEqual(uncertain["error"]["type"], "submit_uncertain")
+        retry = self.ok_call("job_submit", {**args, "dry_run": False, "plan_digest": plan["plan_digest"]})
+        self.assertTrue(retry["reconciled"])
+        self.assertEqual(retry["notify"]["notification"]["jobs"], [retry["job_id"]])
+        again = self.ok_call("job_submit", {**args, "dry_run": False, "plan_digest": plan["plan_digest"]})
+        self.assertNotIn("notify", again)  # joined once
+        self.assertEqual(len(self.ok_call("notify_list")["notifications"]), 1)
+
+    def test_adopting_binds_a_keyless_uncertain_submission(self):
+        state = self.read_state()
+        state["qsub_mode"] = "garbage"
+        self.write_state(state)
+        args = self.args()
+        plan = self.ok_call("job_submit", args)
+        with mock.patch("miyabi_mcp.submit.reconcile", return_value=None):
+            uncertain = self.call("job_submit", {**args, "dry_run": False, "plan_digest": plan["plan_digest"]})
+        self.assertIn("adopt=true", uncertain["error"]["message"])
+        adopted = self.ok_call("job_annotate", {"job_id": "3800000", "adopt": True})
+        record = adopted["record"]
+        self.assertEqual((record["origin"], record["status"]), ("submitted", "submitted"))
+        self.assertEqual(record["submit_id"], uncertain["error"]["submit_id"])
+        self.assertEqual(len(self.ok_call("ledger_query")["records"]), 1)
+
+    def test_a_retry_completes_the_user_index(self):
+        policy = self.user_root / ".miyabi-mcp" / "policy.json"
+        policy.write_text(json.dumps({"user": {"budget_windows": [{"window": "24h", "max_jobs": 1}]}}))
+        args = self.args(request_key="key-ix")
+        plan = self.ok_call("job_submit", args)
+        with mock.patch("miyabi_mcp.submit.index_append", side_effect=OSError("disk full")):
+            broken = self.call("job_submit", {**args, "dry_run": False, "plan_digest": plan["plan_digest"]})
+        self.assertFalse(broken["ok"])
+        self.assertEqual(len(self.read_state()["jobs"]), 1)  # PBS took the job; the user index missed it
+        retry = self.ok_call("job_submit", {**args, "dry_run": False, "plan_digest": plan["plan_digest"]})
+        self.assertTrue(retry["idempotent"])
+        self.assertNotIn("reconciled", retry)  # the record knew its job
+        self.assertEqual(len(self.read_state()["jobs"]), 1)
+        second = self.ok_call("job_submit", self.args(request_key="key-ix2", name="k2"))
+        self.assertFalse(second["valid"])  # the window counts the first job
+        self.assertIn("1 jobs already submitted", json.dumps(second["checks"]))
+
+    def test_a_used_key_whose_job_sealed_its_notification_can_be_retried(self):
+        args = self.args(request_key="key-n", notify={"name": "solo", "notifier": "box", "expected": 1})
+        first = self.submit(**args)
+        dry = self.ok_call("job_submit", args)
+        self.assertTrue(dry["valid"], dry["checks"])
+        self.assertEqual(next(c for c in dry["checks"] if c["id"] == "notify")["status"], "warn")
+        again = self.ok_call("job_submit", {**args, "dry_run": False, "plan_digest": dry["plan_digest"]})
+        self.assertTrue(again["idempotent"])
+        self.assertEqual(again["job_id"], first["job_id"])
+        self.assertEqual(len(self.read_state()["jobs"]), 1)
+
+    def test_a_commit_that_lost_the_submit_lock_submits_nothing(self):
+        args = self.args(request_key="key-lost")
+        plan = self.ok_call("job_submit", args)
+        with mock.patch.object(Lock, "renew", return_value=False):
+            lost = self.call("job_submit", {**args, "dry_run": False, "plan_digest": plan["plan_digest"]})
+        self.assertEqual(lost["error"]["type"], "lock_lost")
+        self.assertEqual(self.read_state()["jobs"], {})
+        failed = Store(self.settings()).read_submission(lost["error"]["submit_id"])
+        self.assertEqual(failed["status"], "submit_failed")
+        again = self.ok_call("job_submit", {**args, "dry_run": False, "plan_digest": plan["plan_digest"]})
+        self.assertNotIn("idempotent", again)
+        self.assertEqual(len(self.read_state()["jobs"]), 1)
+
+    def test_expired_plans_are_pruned(self):
+        plans = self.project / ".miyabi-mcp" / "plans"
+        self.ok_call("job_submit", self.args(name="old"))
+        [old] = plans.glob("*.json")
+        os.utime(old, (time.time() - 3600, time.time() - 3600))
+        self.ok_call("job_submit", self.args(name="new"))
+        self.assertFalse(old.exists())
+        self.assertEqual(len(list(plans.glob("*.json"))), 1)
+
+
+class CancelFailureTests(FakePbsCase):
+    def refuse(self, *job_ids: str) -> None:
+        state = self.read_state()
+        state["qdel_refuse"] = [job_id.split(".")[0] for job_id in job_ids]
+        self.write_state(state)
+
+    def cancel(self, job_ids: list[str]) -> dict:
+        plan = self.ok_call("job_cancel", {"job_ids": job_ids})
+        return self.call("job_cancel", {"job_ids": job_ids, "dry_run": False, "reason": "test",
+                                        "targets_digest": plan["targets_digest"]})
+
+    def record(self, job_id: str) -> dict:
+        return next(r for r in self.ok_call("ledger_query")["records"] if r["job_id"] == job_id)
+
+    def test_a_refused_qdel_is_an_error_and_not_a_cancellation(self):
+        job_id = self.submit(name="x")["job_id"]
+        self.start(job_id)
+        self.refuse(job_id)
+        result = self.cancel([job_id])
+        self.assertEqual(result["error"]["type"], "qdel_failed")
+        self.assertEqual(result["error"]["targets"][0]["result"], "qdel_failed")
+        self.assertFalse(self.record(job_id)["cancel_requested"])
+        self.finish(job_id, exit_status=-29)  # later killed at its walltime: that is a failure, not our cancel
+        self.ok_call("job_list")
+        state = self.record(job_id)["state"]
+        self.assertEqual((state["raw_state"], state["outcome"]), ("F Exit_status=-29", "failed"))
+        kinds = [e["kind"] for e in self.ok_call("ledger_query", {"format": "events"})["events"]]
+        self.assertEqual(kinds.index("cancel_failed"), kinds.index("cancel_requested") + 1)
+        self.assertEqual(kinds[-1], "ended")
+
+    def test_a_partial_failure_names_both_sides(self):
+        done, kept = self.submit(name="a")["job_id"], self.submit(name="b")["job_id"]
+        self.start(done)
+        self.start(kept)
+        self.refuse(kept)
+        result = self.cancel([done, kept])
+        self.assertTrue(result["ok"])
+        self.assertEqual((result["cancelled"], result["failed"]), ([done], [kept]))
+        self.assertIn(kept, result["warning"])
+        self.assertEqual(self.record(done)["state"]["outcome"], "cancelled")
+        self.assertFalse(self.record(kept)["cancel_requested"])
+
+    def test_a_whole_qdel_failure_without_job_ids_counts_for_every_target(self):
+        job_id = self.submit(name="x")["job_id"]
+        qdel = self.bin / "qdel"
+        qdel.unlink()
+        qdel.write_text("#!/bin/sh\necho 'qdel: cannot connect to server opbs (errno=111)' >&2\nexit 2\n")
+        qdel.chmod(0o755)
+        result = self.cancel([job_id])
+        self.assertEqual(result["error"]["type"], "qdel_failed")
+        self.assertFalse(self.record(job_id)["cancel_requested"])
+
+
+class LedgerEdgeTests(FakePbsCase):
+    def test_mig_usage_is_labelled_without_configuration(self):
+        job_id = self.submit(queue="debug-mig", name="m")["job_id"]
+        self.start(job_id)
+        self.finish(job_id)
+        self.ok_call("job_list")
+        record = self.ok_call("ledger_query")["records"][0]
+        self.assertEqual(record["usage"]["hardware"], "GH200 MIG")
+
+    def test_a_reappearing_job_gets_a_new_grace_period(self):
+        job_id = self.submit(name="x")["job_id"]
+        state = self.read_state()
+        hidden = state["jobs"].pop(job_id.split(".")[0])
+        self.write_state(state)
+        self.ok_call("job_list")  # missing_s=0: unknown at once
+        record = self.ok_call("ledger_query", {"refresh": False})["records"][0]
+        self.assertEqual(record["state"]["execution_state"], "unknown")
+        self.assertIn("missing_since", record)
+        state = self.read_state()
+        state["jobs"][job_id.split(".")[0]] = hidden
+        self.write_state(state)
+        self.ok_call("job_list")
+        record = self.ok_call("ledger_query", {"refresh": False})["records"][0]
+        self.assertEqual(record["state"]["execution_state"], "queued")
+        self.assertNotIn("missing_since", record)
+
+    def test_events_never_go_back_to_an_older_month_file(self):
+        events = self.project / ".miyabi-mcp" / "events"
+        events.mkdir(parents=True)
+        (events / "2999-01.jsonl").write_text("")  # a newer month already exists (another node's clock)
+        self.submit(name="x")
+        self.assertEqual([p.name for p in events.glob("*.jsonl")], ["2999-01.jsonl"])
+        first = self.ok_call("ledger_query", {"format": "events"})
+        self.assertTrue(first["next_cursor"].startswith("2999-01:"))
+
+    def event_ids(self) -> list[str]:
+        return [e["event_id"] for e in self.ok_call("ledger_query", {"format": "events"})["events"]]
+
+    def test_a_failed_record_write_never_repeats_an_event_id(self):
+        job_id = self.submit(name="x")["job_id"]
+        self.start(job_id)
+        real, failed = Store.write, []
+
+        def full_quota(store, record):  # the record write fails once; a small append would still go through
+            if (record.get("state") or {}).get("execution_state") == "running" and not failed:
+                failed.append(1)
+                raise OSError(122, "Disk quota exceeded")
+            return real(store, record)
+
+        with mock.patch.object(Store, "write", full_quota):
+            self.assertFalse(self.call("job_list")["ok"])
+        self.ok_call("job_list")
+        self.finish(job_id)
+        self.ok_call("job_list")
+        ids = self.event_ids()
+        self.assertEqual(len(ids), len(set(ids)), ids)
+        self.assertEqual(ids[-1], f"miyabi-pbs:{job_id}:3")
+
+    def test_a_failed_append_puts_the_record_back(self):
+        job_id = self.submit(name="x")["job_id"]
+        self.start(job_id)
+        with mock.patch.object(Store, "_append_event", side_effect=OSError(5, "Input/output error")):
+            self.assertFalse(self.call("job_list")["ok"])
+        record = self.ok_call("ledger_query", {"refresh": False})["records"][0]
+        self.assertEqual((record["seq"], record["state"]["execution_state"]), (1, "queued"))
+        self.ok_call("job_list")
+        self.assertEqual(self.event_ids(), [f"miyabi-pbs:{job_id}:1", f"miyabi-pbs:{job_id}:2"])
+
+    def test_a_retry_never_rebinds_over_newer_events(self):
+        args = {"script": str(self.script), "queue": "debug-g", "walltime": "00:10:00", "name": "x",
+                "request_key": "key-r"}
+        job_id = self.submit(**args)["job_id"]
+        self.start(job_id)
+        self.ok_call("job_list")  # running: seq 2
+        store = Store(self.settings())
+        request = json.loads(store.request_path("key-r").read_text())
+        request.pop("job_id")
+        request["status"] = "uncertain"  # as if the call stopped between writing the record and the key
+        store.request_path("key-r").write_text(json.dumps(request))
+        again = self.call("job_submit", {**args, "dry_run": False})
+        self.assertTrue(again["idempotent"], again)
+        self.assertEqual(again["events"], [])
+        self.finish(job_id)
+        self.ok_call("job_list")
+        ids = self.event_ids()
+        self.assertEqual(len(ids), len(set(ids)), ids)
+        self.assertEqual(json.loads(store.request_path("key-r").read_text())["job_id"], job_id)
+
+    def test_an_invalid_verdict_adopts_nothing(self):
+        state = self.read_state()
+        state["jobs"]["3700000"] = {"name": "ext", "state": "Q", "queue": "debug-g", "route": "debug-g",
+                                    "project": "gtest", "select": "1:mpiprocs=1", "units": 1, "mig": False,
+                                    "walltime": "00:10:00", "qtime": 1793300000, "stime": None, "obittime": None,
+                                    "exit_status": None, "used": None, "output": "/work/x.log", "variables": {},
+                                    "submit_args": "-q debug-g ext.pbs"}
+        self.write_state(state)
+        result = self.call("job_annotate", {"job_id": "3700000", "adopt": True, "verdict": {"status": "great"}})
+        self.assertEqual(result["error"]["type"], "invalid_arguments")
+        self.assertEqual(self.ok_call("ledger_query")["records"], [])
+
+
+class LockTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "lock"
+
+    def make_stale(self, lock: Lock) -> None:  # its holder stalled past the lease
+        past = time.time() - 10
+        os.utime(self.path, (past, past))
+        lock._since = past
+
+    def test_waiting_does_not_shorten_the_lease(self):
+        first = Lock(self.path, lease=60, timeout=0).acquire()
+        threading.Timer(0.6, first.release).start()
+        second = Lock(self.path, lease=60, timeout=5).acquire()
+        self.assertLess(time.time() - self.path.stat().st_mtime, 0.4)
+        second.release()
+
+    def test_a_breaker_moves_only_the_stale_lock(self):
+        stale = Lock(self.path, lease=1, timeout=0).acquire()
+        token = stale.token
+        self.make_stale(stale)
+        seen, real = {}, Lock._move_stale
+
+        def racing_move(lock: Lock) -> None:
+            if not seen:
+                # The breaker holds the guard and found the lock stale. Its holder wakes up and releases, and a
+                # second breaker tries: neither may change the lock file before the rename.
+                seen["release"] = threading.Thread(target=stale.release)
+                seen["release"].start()
+                time.sleep(0.3)
+                seen["waiting"] = seen["release"].is_alive()
+                Lock(self.path, lease=1, timeout=0)._break_if_stale()
+                seen["holder"] = self.path.read_text()
+            real(lock)
+
+        with mock.patch.object(Lock, "_move_stale", racing_move):
+            taker = Lock(self.path, lease=1, timeout=5).acquire()
+        seen["release"].join(10)
+        self.assertTrue(seen["waiting"])
+        self.assertEqual(seen["holder"], token)
+        self.assertEqual(self.path.read_text(), taker.token)  # the late release left the new lock alone
+        with self.assertRaises(MiyabiError):
+            Lock(self.path, lease=1, timeout=0).acquire()
+        taker.release()
+        self.assertFalse(self.path.exists())
+
+    def test_renew_tells_a_holder_it_lost_the_lock(self):
+        held = Lock(self.path, lease=1, timeout=0).acquire()
+        self.assertTrue(held.renew())
+        self.make_stale(held)
+        other = Lock(self.path, lease=1, timeout=2).acquire()
+        self.assertFalse(held.renew())
+        self.assertIsNone(held.token)
+        held.release()
+        self.assertEqual(self.path.read_text(), other.token)
+        other.release()
 
 
 class ExportShapeTests(unittest.TestCase):

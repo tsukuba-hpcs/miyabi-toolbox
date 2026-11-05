@@ -309,6 +309,93 @@ class StateTests(NotifyCase):
         self.assertEqual(self.call("notify_cancel", {"id": item["id"]})["error"]["type"], "invalid_state")
 
 
+class FiredGroupTests(NotifyCase):
+    """A fired notification is never evaluated again: it takes no more jobs and its name is free."""
+
+    def fire_by_timeout(self) -> dict:
+        made = self.ok_call("notify_create", {"name": "grp", "timeout": 1, "notifier": "testbox"})
+        time.sleep(1.2)
+        self.poll()
+        self.assertEqual(self.ok_call("notify_list")["notifications"][0]["status"], "fired")
+        return made["notification"]
+
+    def test_a_late_job_starts_a_new_group_and_is_reported(self):
+        old = self.fire_by_timeout()
+        plan = self.ok_call("job_submit", {"script": str(self.script), "queue": "debug-g", "walltime": "00:10:00",
+                                           "notify": {"name": "grp", "notifier": "testbox"}})
+        self.assertIn("creates notification grp", next(c for c in plan["checks"] if c["id"] == "notify")["detail"])
+        late = self.submit(name="late", notify={"name": "grp", "notifier": "testbox", "expected": 1})
+        self.assertTrue(late["notify"]["created"])
+        self.assertNotEqual(late["notify"]["notification"]["id"], old["id"])
+        self.finish(late["job_id"])
+        kinds = {(m["notification_id"], m["kind"]) for m in self.poll()["messages"]}
+        self.assertIn((late["notify"]["notification"]["id"], "final"), kinds)
+
+    def test_a_fired_group_refuses_updates_and_frees_its_name(self):
+        old = self.fire_by_timeout()
+        job_id = self.submit(name="x")["job_id"]
+        refused = self.call("notify_update", {"id": old["id"], "add_job_ids": [job_id]})
+        self.assertEqual(refused["error"]["type"], "invalid_state")
+        made = self.ok_call("notify_create", {"name": "grp", "job_ids": [job_id], "notifier": "testbox"})
+        self.assertNotEqual(made["notification"]["id"], old["id"])
+        updated = self.ok_call("notify_update", {"name": "grp", "message": "by name: the open one"})
+        self.assertEqual(updated["notification"]["id"], made["notification"]["id"])
+        duplicate = self.call("notify_create", {"name": "grp", "notifier": "testbox", "timeout": 60})
+        self.assertEqual(duplicate["error"]["type"], "exists")
+
+
+class JoinRaceTests(NotifyCase):
+    def test_a_job_does_not_join_a_group_sealed_after_the_lookup(self):
+        first = self.submit(name="a", notify={"name": "g", "notifier": "testbox", "expected": 2})
+        settings = self.settings()
+        store = notify.Store(settings)
+        looked_up = notify._named(store.state, "g", "open")  # what join saw before another call sealed it
+        self.ok_call("notify_update", {"name": "g", "seal": True})
+        second = self.submit(name="b")["job_id"]
+        with mock.patch.object(notify, "_named", return_value=looked_up), self.assertRaises(MiyabiError) as caught:
+            notify.join(settings, store, {"name": "g", "notifier": "testbox"}, second)
+        self.assertEqual(caught.exception.kind, "sealed")
+        self.assertEqual(notify._named(store.state, "g", "open")["jobs"], [first["job_id"]])
+
+    def test_joining_again_adds_the_job_once(self):
+        job_id = self.submit(name="a", notify={"name": "g", "notifier": "testbox", "expected": 1})["job_id"]
+        settings = self.settings()
+        again = notify.join(settings, notify.Store(settings), {"name": "g", "notifier": "testbox"}, job_id)
+        self.assertEqual(again["notification"]["jobs"], [job_id])
+
+
+class DeliveryErrorTests(NotifyCase):
+    def send(self, argv: list[str]) -> dict:
+        return delivery.send({"method": "command", "name": "x"}, "hi", state_dir=self.project, notification_id="N-1",
+                             msg_id="N-1:1", commands={"x": argv})
+
+    def test_a_missing_program_fails_instead_of_counting_as_delivered(self):
+        self.assertEqual(self.send([str(self.project / "no-such-program")])["status"], "failed")
+
+    def test_a_timeout_may_have_delivered_and_a_full_disk_is_retried(self):
+        with mock.patch("subprocess.run", side_effect=subprocess.TimeoutExpired("x", 60)):
+            self.assertEqual(self.send(["true"])["status"], "uncertain")
+        with mock.patch("subprocess.run", side_effect=OSError(28, "No space left on device")):
+            self.assertEqual(self.send(["true"])["status"], "retry")
+
+
+class NotifierNameTests(NotifyCase):
+    def test_notifier_names_are_checked_and_commands_quoted(self):
+        bad = self.call("notify_create", {"name": "x", "timeout": 60, "notifier": "box; rm -rf ~"})
+        self.assertEqual(bad["error"]["type"], "invalid_arguments")
+        plan = self.ok_call("job_submit", {"script": str(self.script), "queue": "debug-g", "walltime": "00:10:00",
+                                           "notify": {"notifier": "../x"}})
+        self.assertEqual(next(c for c in plan["checks"] if c["id"] == "notify")["status"], "fail")
+        with self.assertRaises(MiyabiError):
+            notify.poll(self.settings(), "../../etc/x", "test")
+        spaced = self.user_root / "my project"
+        spaced.mkdir()
+        command = notify.export_command(self.settings(), spaced, notifier="laptop")
+        self.assertIn(f"--project-dir '{spaced}'", command)
+        with self.assertRaises(MiyabiError):
+            notifyd.Options(notifier="a b")
+
+
 class DaemonLifecycleTests(NotifyCase):
     def setUp(self):
         super().setUp()
@@ -375,6 +462,42 @@ class DaemonLifecycleTests(NotifyCase):
         self.assertIn("a listener took its last message at", taken)
         stranger = notifyd._gone("N-x", self.opts, self.paths, delivery.inbox(self.paths["dir"], "N-x"))
         self.assertIn("notify_list shows each notification's notifier", stranger)
+
+    def listen_once(self, last_ok_started_at: str) -> tuple[int, str]:
+        """Run the listener with a daemon state whose last good poll ended after the listener started; a
+        message arrives in its inbox after a few rounds unless the listener gives up first."""
+        write_json(self.paths["state"], {"status": "running", "last_ok_at": (now() + timedelta(seconds=5)).isoformat(),
+                                         "last_ok_started_at": last_ok_started_at})
+        write_json(self.paths["known"], {})
+        box = delivery.inbox(self.paths["dir"], "N-new")
+        clock = iter(range(0, 10 ** 6, 61))  # every look at the clock is 61 s later: each round checks
+        rounds = []
+
+        def sleep(_seconds):
+            rounds.append(1)
+            if len(rounds) == 3:
+                box.mkdir(parents=True, exist_ok=True)
+                (box / "N-new_1.json").write_text(json.dumps({"message": "the job ended"}))
+
+        printed = []
+
+        def capture(*args, **_kwargs):
+            printed.extend(args)
+
+        with mock.patch.object(notifyd, "ensure"), mock.patch.object(notifyd.time, "monotonic", lambda: next(clock)), \
+                mock.patch.object(notifyd.time, "sleep", sleep), mock.patch("builtins.print", capture):
+            code = notifyd.listen("N-new", self.opts)
+        return code, " ".join(map(str, printed))
+
+    def test_listener_ignores_a_poll_that_began_before_it(self):
+        # The poll began before the notification existed and ended after the listener started.
+        code, text = self.listen_once((now() - timedelta(seconds=30)).isoformat())
+        self.assertEqual((code, text), (0, "the job ended"))
+
+    def test_listener_gives_up_after_a_poll_that_began_after_it(self):
+        code, text = self.listen_once((now() + timedelta(seconds=5)).isoformat())
+        self.assertEqual(code, 3)
+        self.assertIn("no longer open for notifier box", text)
 
     def test_old_closed_inboxes_are_removed(self):
         old, recent = (now() - timedelta(days=8)).isoformat(), now().isoformat()

@@ -91,6 +91,12 @@ def send(deliver: dict, message: str, *, state_dir: Path, notification_id: str, 
                                     check=False)
             return {"status": "delivered" if result.returncode == 0 else "uncertain",
                     "returncode": result.returncode, "stderr": result.stderr[-2000:]}
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except (FileNotFoundError, PermissionError) as exc:
+        # The program, file or directory is missing or not allowed here: nothing was sent, and retrying does
+        # not help. "uncertain" would count as delivered and stop the retries.
+        return {"status": "failed", "detail": str(exc)}
+    except subprocess.TimeoutExpired as exc:  # the program ran and may have delivered
         return {"status": "uncertain", "detail": str(exc)}
+    except OSError as exc:  # nothing was started or written (e.g. a full disk): try again
+        return {"status": "retry", "detail": str(exc)}
     raise MiyabiError("invalid_arguments", f"unknown delivery method {method}")

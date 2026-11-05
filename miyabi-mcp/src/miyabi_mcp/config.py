@@ -37,6 +37,8 @@ DEFAULT_CONFIG = {
     "submit_grace_s": 120,
     "missing_s": 300,
     "deliver_commands": {},
+    # The `hardware` of measured MIG usage (DESIGN.md 11.2, D2): without it the label would be null.
+    "mig_hardware": "GH200 MIG",
 }
 
 

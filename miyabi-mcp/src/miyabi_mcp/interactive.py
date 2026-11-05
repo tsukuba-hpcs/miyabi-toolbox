@@ -258,8 +258,8 @@ def start(settings: Settings, plan_digest: str) -> int:
                         record = store.read_submission(request["submit_id"]) if request else None
                         job_id = (record.get("job_id") or submit.reconcile(settings, record)) if record else None
                         if job_id and not record.get("job_id"):
-                            submit._bind(settings, store, record, job_id)
-                            submit._first_event(settings, store, job_id)
+                            submit.bind_submission(settings, store, record, job_id, reconciled=True)
+                            submit.first_events(settings, store, job_id)
                     if not job_id and record:
                         print(compact({"cleanup_error": "submission not yet found; reconcile this request_key",
                                        "submit_id": record["submit_id"]}), file=sys.stderr)
@@ -268,6 +268,8 @@ def start(settings: Settings, plan_digest: str) -> int:
                         store.note(job_id, "cancel_requested", "qdel requested", note="interactive terminal disconnected")
                     cancellation = Pbs(settings).qdel([job_id])
                     if cancellation.returncode:
+                        if store.find(job_id):  # its end must not count as cancelled by us
+                            store.note(job_id, "cancel_failed", "qdel failed", note=cancellation.stderr.strip()[-500:])
                         print(compact({"cleanup_error": cancellation.stderr, "job_id": job_id}), file=sys.stderr)
             except MiyabiError as exc:
                 print(compact({"cleanup_error": str(exc), "job_id": job_id}), file=sys.stderr)
