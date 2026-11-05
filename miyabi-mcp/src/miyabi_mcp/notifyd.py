@@ -196,8 +196,8 @@ def ensure(opts: Options, by: str = "ensure") -> dict:
         return _running(opts, paths, state)
     holder = Lock(paths["lock"]).holder()
     raise MiyabiError("daemon_failed", f"no notification daemon runs, and a new one cannot take the lock {paths['lock']} "
-                      f"(held by {holder!r}); a lock its holder stopped refreshing frees itself after "
-                      f"{3 * opts.poll_seconds + 120} s. See {paths['log']}")
+                      f"(held by {holder!r}): the process holding it is still alive, and the lock goes away when it "
+                      f"exits. See {paths['log']}")
 
 
 def stop(opts: Options) -> dict:
@@ -276,7 +276,7 @@ def _hand_over(opts: Options, paths: dict, lock: Lock, state: dict, instance: st
 def run(opts: Options) -> int:
     paths = _paths(opts)
     paths["dir"].mkdir(parents=True, exist_ok=True)
-    lock = Lock(paths["lock"], lease=3 * opts.poll_seconds + 120, timeout=0)
+    lock = Lock(paths["lock"], timeout=0)
     try:
         lock.acquire()
     except MiyabiError:
@@ -300,9 +300,6 @@ def run(opts: Options) -> int:
         while True:
             if stopping["flag"] or paths["stop"].exists():
                 reason = "stopped"
-                break
-            if not lock.renew():  # e.g. this machine slept past the lease and a newer daemon took over
-                reason = "lost_lock"
                 break
             try:
                 poll_started = now_iso()
@@ -365,13 +362,8 @@ def run(opts: Options) -> int:
                     continue  # resumed: poll again at once, which also tells the server it runs
             write_json(paths["state"], state)
             end = time.monotonic() + opts.poll_seconds * 2 ** min(failures, 3)
-            touched = time.monotonic()
             while time.monotonic() < end and not stopping["flag"] and not paths["stop"].exists():
                 time.sleep(min(1.0, max(0.0, end - time.monotonic())))
-                if time.monotonic() - touched > 30:
-                    if not lock.renew():
-                        break  # the check before the next poll ends this daemon
-                    touched = time.monotonic()
     except KeyboardInterrupt:
         reason = "stopped"
     finally:
@@ -383,7 +375,7 @@ def run(opts: Options) -> int:
             paths["stop"].unlink(missing_ok=True)
             lock.release()
         _log(paths, event="exited", reason=reason, last_ok_at=state.get("last_ok_at"), handed_over=not holding)
-        if reason not in {"idle", "lost_lock"}:  # _hand_over reported an idle exit; the new daemon runs now
+        if reason != "idle":  # an idle exit was reported by _hand_over
             try:
                 poll(opts, instance, exiting=reason)
             except TRANSIENT as exc:

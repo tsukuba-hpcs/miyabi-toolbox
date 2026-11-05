@@ -406,7 +406,7 @@ class DaemonLifecycleTests(NotifyCase):
         self.paths["dir"].mkdir(parents=True)
 
     def hand_over(self, result=None, error=None, successor=False):
-        lock = Lock(self.paths["lock"], lease=60, timeout=0).acquire()
+        lock = Lock(self.paths["lock"], timeout=0).acquire()
         state = {"status": "running", "pid": os.getpid(), "host": notifyd.short_host()}
 
         def report(opts, instance=None, exiting=None):
@@ -414,7 +414,7 @@ class DaemonLifecycleTests(NotifyCase):
             self.assertEqual(read_json(self.paths["state"])["status"], "exiting")
             self.assertFalse(self.paths["lock"].exists())  # free before the server hears of the exit
             if successor:
-                Lock(self.paths["lock"], lease=60, timeout=0).acquire()
+                Lock(self.paths["lock"], timeout=0).acquire()
             if error:
                 raise error
             return result

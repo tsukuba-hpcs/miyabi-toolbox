@@ -1,8 +1,10 @@
 """Submit, observe, cancel, adopt and export through the tool layer against the fake PBS."""
 
+import fcntl
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -687,19 +689,6 @@ class RequestKeyTests(FakePbsCase):
         self.assertEqual(again["job_id"], first["job_id"])
         self.assertEqual(len(self.read_state()["jobs"]), 1)
 
-    def test_a_commit_that_lost_the_submit_lock_submits_nothing(self):
-        args = self.args(request_key="key-lost")
-        plan = self.ok_call("job_submit", args)
-        with mock.patch.object(Lock, "renew", return_value=False):
-            lost = self.call("job_submit", {**args, "dry_run": False, "plan_digest": plan["plan_digest"]})
-        self.assertEqual(lost["error"]["type"], "lock_lost")
-        self.assertEqual(self.read_state()["jobs"], {})
-        failed = Store(self.settings()).read_submission(lost["error"]["submit_id"])
-        self.assertEqual(failed["status"], "submit_failed")
-        again = self.ok_call("job_submit", {**args, "dry_run": False, "plan_digest": plan["plan_digest"]})
-        self.assertNotIn("idempotent", again)
-        self.assertEqual(len(self.read_state()["jobs"]), 1)
-
     def test_expired_plans_are_pruned(self):
         plans = self.project / ".miyabi-mcp" / "plans"
         self.ok_call("job_submit", self.args(name="old"))
@@ -870,58 +859,65 @@ class LockTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.path = Path(self.tmp.name) / "lock"
 
-    def make_stale(self, lock: Lock) -> None:  # its holder stalled past the lease
-        past = time.time() - 10
-        os.utime(self.path, (past, past))
-        lock._since = past
-
-    def test_waiting_does_not_shorten_the_lease(self):
-        first = Lock(self.path, lease=60, timeout=0).acquire()
-        threading.Timer(1.5, first.release).start()
-        second = Lock(self.path, lease=60, timeout=5).acquire()
-        # Counted from when the wait began, the lock would look 1.5 s old; whole-second mtimes (Lustre) add < 1 s.
-        self.assertLess(time.time() - self.path.stat().st_mtime, 1.25)
-        second.release()
-
-    def test_a_breaker_moves_only_the_stale_lock(self):
-        stale = Lock(self.path, lease=1, timeout=0).acquire()
-        token = stale.token
-        self.make_stale(stale)
-        seen, real = {}, Lock._move_stale
-
-        def racing_move(lock: Lock) -> None:
-            if not seen:
-                # The breaker holds the guard and found the lock stale. Its holder wakes up and releases, and a
-                # second breaker tries: neither may change the lock file before the rename.
-                seen["release"] = threading.Thread(target=stale.release)
-                seen["release"].start()
-                time.sleep(0.3)
-                seen["waiting"] = seen["release"].is_alive()
-                Lock(self.path, lease=1, timeout=0)._break_if_stale()
-                seen["holder"] = self.path.read_text()
-            real(lock)
-
-        with mock.patch.object(Lock, "_move_stale", racing_move):
-            taker = Lock(self.path, lease=1, timeout=5).acquire()
-        seen["release"].join(10)
-        self.assertTrue(seen["waiting"])
-        self.assertEqual(seen["holder"], token)
-        self.assertEqual(self.path.read_text(), taker.token)  # the late release left the new lock alone
-        with self.assertRaises(MiyabiError):
-            Lock(self.path, lease=1, timeout=0).acquire()
-        taker.release()
-        self.assertFalse(self.path.exists())
-
-    def test_renew_tells_a_holder_it_lost_the_lock(self):
-        held = Lock(self.path, lease=1, timeout=0).acquire()
-        self.assertTrue(held.renew())
-        self.make_stale(held)
-        other = Lock(self.path, lease=1, timeout=2).acquire()
-        self.assertFalse(held.renew())
-        self.assertIsNone(held.token)
+    def test_a_held_lock_turns_others_away_and_names_its_holder(self):
+        held = Lock(self.path, timeout=0).acquire()
+        with self.assertRaises(MiyabiError) as caught:
+            Lock(self.path, timeout=0.3).acquire()  # the same process through another open file: excluded too
+        self.assertEqual((caught.exception.kind, caught.exception.details["holder"]), ("lock_timeout", held.token))
         held.release()
-        self.assertEqual(self.path.read_text(), other.token)
-        other.release()
+        self.assertFalse(self.path.exists())
+        Lock(self.path, timeout=0).acquire().release()
+
+    def test_threads_take_turns(self):
+        inside, overlaps = [], []
+
+        def work() -> None:
+            for _ in range(20):
+                with Lock(self.path, timeout=30):
+                    overlaps.extend(inside)
+                    inside.append(threading.get_ident())
+                    time.sleep(0.002)
+                    inside.pop()
+
+        threads = [threading.Thread(target=work) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(60)
+        self.assertEqual(overlaps, [])
+
+    def test_a_dead_holder_frees_the_lock_at_once(self):
+        code = ("import pathlib, sys, time; sys.path.insert(0, sys.argv[1]); from miyabi_mcp.util import Lock; "
+                "Lock(pathlib.Path(sys.argv[2]), timeout=0).acquire(); print('held', flush=True); time.sleep(60)")
+        child = subprocess.Popen([sys.executable, "-c", code, str(ROOT / "src"), str(self.path)],
+                                 stdout=subprocess.PIPE, text=True)
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        self.assertEqual(child.stdout.readline().strip(), "held")
+        with self.assertRaises(MiyabiError):
+            Lock(self.path, timeout=0).acquire()
+        child.kill()
+        child.wait()
+        child.stdout.close()
+        Lock(self.path, timeout=1).acquire().release()  # no lease to wait out
+
+    def test_a_waiter_does_not_keep_a_deleted_lock_file(self):
+        holder = Lock(self.path, timeout=0).acquire()
+        real, others = fcntl.flock, []
+
+        def flock(fd: int, operation: int) -> None:
+            if operation & fcntl.LOCK_EX and not others:
+                # The waiter has opened the lock file. Before it locks it, the holder releases (deleting the
+                # file) and another caller takes the lock on a new file.
+                others.append(None)
+                holder.release()
+                others[0] = Lock(self.path, timeout=0).acquire()
+            real(fd, operation)
+
+        with mock.patch.object(fcntl, "flock", flock), self.assertRaises(MiyabiError):
+            Lock(self.path, timeout=0.5).acquire()  # it locked the deleted file, saw that, and found the lock held
+        self.assertEqual(self.path.read_text(), others[0].token)
+        others[0].release()
 
 
 class ExportShapeTests(unittest.TestCase):

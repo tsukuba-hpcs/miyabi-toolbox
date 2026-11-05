@@ -668,7 +668,7 @@ def submit(settings: Settings, args: dict, *, interactive_qsub=None) -> dict:
         if not saved or not within(saved.get("created_at"), PLAN_TTL_S):
             raise MiyabiError("plan_expired", "the plan is older than 10 minutes or unknown; run the dry run again")
     pbs = Pbs(settings)
-    with submit_lock(settings) as lock:
+    with submit_lock(settings):
         if key:  # again under the lock: a concurrent call with the same key may have submitted meanwhile
             earlier = _earlier(settings, store, key, args)
             if earlier:
@@ -708,14 +708,6 @@ def submit(settings: Settings, args: dict, *, interactive_qsub=None) -> dict:
         if key:
             write_json(store.request_path(key), {"request_key": key, "submit_id": submit_id, "status": "submitting",
                                                  "updated_at": now_iso()})
-        if not lock.renew():  # the checks overran the lock's lease and it was broken: another call may submit now
-            record.update(status="submit_failed", error="not submitted: the user's submit lock was taken over")
-            store.write(record)
-            if key:
-                write_json(store.request_path(key), {"request_key": key, "submit_id": submit_id, "status": "failed",
-                                                     "updated_at": now_iso()})
-            raise MiyabiError("lock_lost", "the checks took longer than the submit lock's lease and another call "
-                              "took the lock; nothing was submitted. Run the commit again", submit_id=submit_id)
         reconciled = False
         try:
             result = (interactive_qsub(argv, cwd=Path(plan["workdir"]), output=Path(output))

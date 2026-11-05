@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -18,8 +18,6 @@ from typing import Any, Iterator
 
 SCHEMA_VERSION = 1
 HMS = re.compile(r"(\d+):([0-5]\d):([0-5]\d)")
-# Lustre on Miyabi's /work keeps whole-second mtimes (truncated): a lock may look up to this much older.
-MTIME_SLACK_S = 1.0
 NOTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")  # host-like: it becomes file names and command words
 DIAGNOSTIC_LIMIT = 4096
 
@@ -207,130 +205,72 @@ def tail_text(path: Path, lines: int, max_bytes: int = 65536) -> str:
 # -- locks ----------------------------------------------------------------------------------------------------
 
 class Lock:
-    """Mutual exclusion across processes and login nodes by `os.link` create-if-absent.
+    """Mutual exclusion across processes, threads and login nodes: flock(2) on a lock file.
 
-    `os.link` fails when the target exists, also on Lustre across nodes, so it works where flock may
-    not. A lock older than `lease` seconds is taken to be abandoned and may be broken; a longer hold
-    keeps itself alive with `renew`, which also tells the holder whether the lock is still its own.
-
-    Removing the lock file (breaking, and releasing a lock held long enough to look stale) and checking
-    its owner (`renew`) happen under a second lock, the guard `<name>.guard`. So a breaker's staleness
-    check and its rename see the same file: without the guard, a lock released and taken again between
-    the two would be moved away from its new holder, and a third caller could take it too. A release
-    soon after acquiring skips the guard (no breaker can find that lock stale). The guard is held for
-    moments only and is itself unguarded.
+    /work is Lustre mounted with `flock`, which keeps these locks coherent across client nodes; local
+    disks have them as well. The system drops a lock when its holder exits or dies, so there is no lease
+    and nothing to break: a stuck holder makes the others wait and time out, never lets two in. Every
+    acquire opens the file anew, so threads of one process exclude each other too (a flock belongs to
+    the open file; POSIX lockf/fcntl locks would not). The holder deletes the file before unlocking it;
+    a caller that locked a file deleted meanwhile finds the path leads elsewhere and tries again. While
+    held, the file names its holder (host, pid, time) for diagnostics.
     """
 
-    def __init__(self, path: Path, lease: float = 120.0, timeout: float = 30.0, *, guarded: bool = True):
+    def __init__(self, path: Path, timeout: float = 30.0):
         self.path = path
-        self.lease = lease
-        self.timeout = timeout  # keep below the lease (a lock is fresh again only once taken)
-        self.guarded = guarded
+        self.timeout = timeout
         self.token: str | None = None
-        self._since = 0.0  # wall time of the acquire or the last renew: what a breaker compares the mtime with
+        self._fd: int | None = None
 
     def acquire(self) -> "Lock":
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        token = f"{socket.gethostname()} {os.getpid()} {time.time():.3f} {secrets.token_hex(6)}"
-        fd, temporary = tempfile.mkstemp(prefix=".lock-", dir=self.path.parent)
-        with os.fdopen(fd, "w") as stream:
-            stream.write(token)
         deadline = time.monotonic() + self.timeout
+        while True:
+            fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                os.close(fd)
+                if time.monotonic() >= deadline:
+                    raise MiyabiError("lock_timeout", f"lock {self.path} is held", holder=self.holder()) from None
+                time.sleep(0.05 + random.random() * 0.15)
+                continue
+            except OSError as exc:
+                os.close(fd)
+                raise MiyabiError("lock_unsupported", f"cannot flock {self.path} ({exc.strerror}): the file system "
+                                  "must support flock (Lustre: mount option flock)") from exc
+            if self._current(fd):
+                break
+            os.close(fd)  # its holder deleted it on release: the path leads to another file now
+        token = f"{socket.gethostname()} {os.getpid()} {time.time():.3f} {secrets.token_hex(6)}"
+        os.ftruncate(fd, 0)
+        os.pwrite(fd, token.encode(), 0)
+        self._fd, self.token = fd, token
+        return self
+
+    def _current(self, fd: int) -> bool:
         try:
-            while True:
-                try:
-                    os.link(temporary, self.path)
-                except FileExistsError:
-                    self._break_if_stale()
-                    if time.monotonic() >= deadline:
-                        raise MiyabiError("lock_timeout", f"lock {self.path} is held", holder=self.holder()) from None
-                    time.sleep(0.05 + random.random() * 0.15)
-                    continue
-                os.utime(self.path)  # the lease runs from now, not from when the wait for the lock began
-                self.token, self._since = token, time.time()
-                return self
-        finally:
-            os.unlink(temporary)
+            on_path = os.stat(self.path)
+        except FileNotFoundError:
+            return False
+        held = os.fstat(fd)
+        return (on_path.st_dev, on_path.st_ino) == (held.st_dev, held.st_ino)
 
     def holder(self) -> str | None:
         try:
-            return self.path.read_text()
+            return self.path.read_text() or None
         except OSError:
             return None
 
-    def renew(self) -> bool:
-        """Restart the lease if the lock is still ours, and say whether it is. A holder that overran its lease
-        may have been broken, and another caller may hold the lock now: it must stop writing then."""
-        if self.token is None:
-            return False
-        try:
-            with self._guarded(timeout=60):
-                if self.holder() == self.token:
-                    os.utime(self.path)
-                    self._since = time.time()
-                    return True
-        except MiyabiError:  # the guard stayed busy: assume the worst
-            return False
-        self.token = None
-        return False
-
-    def _expired(self, mtime: float) -> bool:
-        return time.time() - mtime > self.lease + MTIME_SLACK_S
-
-    def _stale(self) -> bool:
-        try:
-            return self._expired(self.path.stat().st_mtime)
-        except FileNotFoundError:
-            return False
-
-    @contextlib.contextmanager
-    def _guarded(self, timeout: float) -> Iterator[None]:
-        if not self.guarded:
-            yield
-            return
-        guard = Lock(self.path.with_name(self.path.name + ".guard"), lease=30, timeout=timeout, guarded=False)
-        guard.acquire()
-        try:
-            yield
-        finally:
-            guard.release()
-
-    def _break_if_stale(self) -> None:
-        if not self._stale():
-            return
-        try:
-            with self._guarded(timeout=0):
-                if self._stale():  # again under the guard: it may have been released and taken meanwhile
-                    self._move_stale()
-        except MiyabiError:
-            pass  # the guard is busy: the lock is being released or broken right now; the caller retries
-
-    def _move_stale(self) -> None:
-        moved = self.path.with_name(f"{self.path.name}.stale-{secrets.token_hex(4)}")
-        try:
-            os.rename(self.path, moved)
-        except FileNotFoundError:
-            return
-        try:
-            if not self._expired(moved.stat().st_mtime):
-                # Taken again between our check and the rename (possible only for an unguarded lock): give it back.
-                with contextlib.suppress(FileExistsError):
-                    os.link(moved, self.path)
-        finally:
-            moved.unlink(missing_ok=True)
-
     def release(self) -> None:
-        if self.token is None:
+        if self._fd is None:
             return
-        token, self.token = self.token, None
-        # Held long enough to look stale, the lock may be under a breaker's eyes: remove it only under the guard.
-        careful = time.time() - self._since > self.lease / 2
+        fd, self._fd, self.token = self._fd, None, None
         try:
-            with self._guarded(timeout=60) if careful else contextlib.nullcontext():
-                if self.holder() == token:
-                    self.path.unlink(missing_ok=True)
-        except MiyabiError:
-            pass  # the guard stayed busy: leave the lock to expire rather than risk removing another's
+            self.path.unlink(missing_ok=True)  # still ours: only a holder deletes it, and only before unlocking
+            fcntl.flock(fd, fcntl.LOCK_UN)  # also for a copy of the descriptor a forked child may still have
+        finally:
+            os.close(fd)
 
     def __enter__(self) -> "Lock":
         return self.acquire()

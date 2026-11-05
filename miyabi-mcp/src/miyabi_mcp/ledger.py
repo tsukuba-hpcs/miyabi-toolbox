@@ -53,8 +53,8 @@ class Store:
     def locator(self, job_id: str) -> str:
         return str(self.job_dir(job_id) / "record.json")
 
-    def lock(self, name: str, lease: float = 120, timeout: float = 30) -> Lock:
-        return Lock(self.state / "locks" / name, lease=lease, timeout=timeout)
+    def lock(self, name: str, timeout: float = 30) -> Lock:
+        return Lock(self.state / "locks" / name, timeout=timeout)
 
     # -- records ----------------------------------------------------------------------------------------------
     def new_submission(self, record: dict) -> Path:
@@ -104,7 +104,7 @@ class Store:
         """Append to the month of the event, or to the newest month file if that is later: a reader's cursor
         has left older files, so an event written into one (clock skew between login nodes, or a month
         turning while the event waited for the lock) would never reach it."""
-        with self.lock("events", lease=60):
+        with self.lock("events"):
             directory = self.state / "events"
             newest = max((path.stem for path in directory.glob("*.jsonl")), default="")
             append_line(directory / f"{max(month(event['observed_at']), newest)}.jsonl", compact(event))
@@ -226,12 +226,12 @@ class Store:
 
 # -- user level ---------------------------------------------------------------------------------------------------
 
-def _user_lock(settings: Settings, name: str, lease: float = 60, timeout: float = 30) -> Lock:
-    return Lock(settings.user_dir / "locks" / name, lease=lease, timeout=timeout)
+def _user_lock(settings: Settings, name: str, timeout: float = 30) -> Lock:
+    return Lock(settings.user_dir / "locks" / name, timeout=timeout)
 
 
 def submit_lock(settings: Settings) -> Lock:
-    return _user_lock(settings, "submit", lease=180, timeout=120)
+    return _user_lock(settings, "submit", timeout=120)
 
 
 def register_project(settings: Settings) -> None:

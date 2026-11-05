@@ -55,7 +55,7 @@ def snapshot(settings: Settings, max_age: float, force: bool = False, newer_than
     if cached and fresh_enough and not force and max_age > 0 \
             and time.time() - float(cached.get("observed_ts", 0)) <= max_age:
         return {**cached, "cache_age_s": _age(cached)}
-    lock = Lock(settings.user_dir / "locks" / "snapshot", lease=90, timeout=0)
+    lock = Lock(settings.user_dir / "locks" / "snapshot", timeout=0)
     try:
         lock.acquire()
     except MiyabiError:
@@ -66,7 +66,7 @@ def snapshot(settings: Settings, max_age: float, force: bool = False, newer_than
             if fresh and (not cached or fresh.get("observed_ts") != cached.get("observed_ts")) \
                     and float(fresh.get("observed_ts", 0)) > newer_than:
                 return {**fresh, "cache_age_s": _age(fresh)}
-        lock = Lock(settings.user_dir / "locks" / "snapshot", lease=90, timeout=30).acquire()
+        lock = Lock(settings.user_dir / "locks" / "snapshot", timeout=30).acquire()
     try:
         started, started_iso = time.time(), now_iso()  # the table reflects PBS at some time after this
         data = Pbs(settings).active()

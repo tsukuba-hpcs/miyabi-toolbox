@@ -128,7 +128,7 @@ def _beat_path(settings: Settings, notifier: str) -> Path:
 def _beat_update(settings: Settings, notifier: str, change) -> dict:
     """Read-modify-write a heartbeat: a daemon's exit report and its successor's first poll may race."""
     path = _beat_path(settings, notifier)
-    with Lock(settings.user_dir / "locks" / f"notifier-{notifier}", lease=60, timeout=30):
+    with Lock(settings.user_dir / "locks" / f"notifier-{notifier}", timeout=30):
         beat = read_json(path) or {}
         change(beat)
         write_json(path, beat)
