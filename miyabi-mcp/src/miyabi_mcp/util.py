@@ -143,14 +143,6 @@ def digest_json(value: Any) -> str:
     return digest_bytes(canonical(value).encode("utf-8"))
 
 
-def digest_file(path: Path) -> str:
-    digest = hashlib.blake2b(digest_size=32)
-    with open(path, "rb") as stream:
-        for chunk in iter(lambda: stream.read(1 << 20), b""):
-            digest.update(chunk)
-    return "blake2b:" + digest.hexdigest()
-
-
 def short_id(nbytes: int = 4) -> str:
     return secrets.token_hex(nbytes)
 

@@ -19,10 +19,6 @@ def parse_error(message: str, text: str = "") -> MiyabiError:
     return MiyabiError("parse_error", message, output=text[-4096:])
 
 
-def notices(text: str) -> list[str]:
-    return [line.strip() for line in text.splitlines() if line.strip().startswith(BANNER)]
-
-
 def scheduled_stop(text: str) -> str | None:
     match = STOP.search(text)
     if not match:
