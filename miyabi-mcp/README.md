@@ -65,6 +65,12 @@ notifier heartbeats and the submit lock. The notification daemon keeps its state
 `notifyd/` there when it runs on a login node, and in `${XDG_STATE_HOME:-~/.local/state}/miyabi-mcp/notifyd/`
 on a workstation.
 
+Locks are `flock` on files in the `locks/` directories, so the file system must support flock (on Miyabi,
+`/work` is Lustre mounted with `flock`). After upgrading from a version that used lock leases, restart every
+miyabi-mcp process (MCP servers, notifyd): old and new processes do not exclude each other. Keep a project on
+one login node if you can. Locks and the order of observations also hold across login nodes, but running
+one project from several login nodes at once has not been tested.
+
 ## Policy
 
 `<project>/.miyabi-mcp/policy.json` limits what agents can submit in that project (unknown keys or wrong

@@ -220,6 +220,7 @@ tool_timeout_sec = 120
 
 - **BatchMode。** 主连接（ControlMaster）不在时服务起不来，用户要先 `ssh -fN miyabi-g`（与 pi-env-mcp 的 shareConnection 相同）。ControlPersist（这里是 8 h）是从最后一个会话断开时开始计时的。
 - **多台登录节点。** 目前至少有 g1、g2、g3。同一主连接里的会话落在同一台，不同主连接可能落在另一台。台账、通知和轮询快照都在共享文件系统上；进程是否存活靠心跳文件判断，不靠 pid。
+- **一个项目用一台登录节点。** 建议同一个项目的 MCP 服务、notifyd 和命令行调用都在同一台登录节点上。这只是使用建议，不是正确性的前提：锁在登录节点之间一致（7.6），观测的先后按查询开始的时间判断（7.3），各节点的时钟由 NTP 同步。几台登录节点同时使用同一个项目没有实测。
 - **PATH。** 服务端用绝对路径调用 PBS 命令（`/usr/local/bin/qstat`、`/opt/pbs/bin/qsub` 等，可配置），不依赖 ssh 非登录 shell 的 PATH。
 - **时区。** 站点时间是 JST。`qstat -f` 的时间不带时区，作业表的 START_DATE 不带年份。服务端统一输出带 `+09:00` 的 ISO 8601，优先用 `-f` 里的完整时间。
 
@@ -360,7 +361,7 @@ miyabi-mcp/
     "pbs_time": "2026-10-30T17:26:01+09:00", "exit_status": 0,
     "pbs": {"exec_host": "mg0123/0*72",
             "exec_vnode": "(mg0123:mem=104857600kb:ncpus=72:ngpus=1:nvnodes-g=1)"},
-    "observed_at": "2026-10-30T17:27:02+09:00", "source": "qstat -H -f", "seq": 4
+    "observed_at": "2026-10-30T17:27:02+09:00", "observed_ts": 1793348818.413, "source": "qstat -H -f", "seq": 4
   },
   "usage": {"node_hours": 0.1725, "basis": "measured", "token_reported": 0.2},
   "markers": {"started": null, "exit": null},
@@ -370,6 +371,8 @@ miyabi-mcp/
 ```
 
 `verdict` 是 agent 或人对应用层结果的结论（`unreviewed`、`verified_success`、`verified_failure`），与 PBS 的 `outcome` 分开。
+
+`state.observed_ts` 是得到这个状态的那次 PBS 查询开始的时间（epoch 秒），用来丢弃较旧的观测（7.3）；`observed_at` 是写入事件的时间。
 
 `state.pbs` 原样保存 PBS 打印的 `exec_host` 和 `exec_vnode`：running 和 ended 观测写入事件和记录，后来缺这两个字段的观测不覆盖已有的值。PBS 历史过期以后，仍能查到作业跑在哪个节点、哪个 MIG 切片上（`exec_host` 的 `mg1112/3*18` 中的 3），诊断节点故障或数值异常时用得上。服务端不解析它们，导出（11.2）也不包含它们。
 
@@ -403,6 +406,10 @@ miyabi-mcp/
 - **事件写入后不再修改。** 后来发现判断有误（例如 Exit_status 的映射）时，追加一条 `reconciled` 事件。
 - **数值在生成事件时定稿。** `node_hours`、`mig_instance_hours` 保留 6 位小数（例如 617 s × 1 节点 → 0.171389），写入事件。导出、台账和通知消息都用这个存下的值，不重新计算。
 - **已结束的作业不再轮询**，所以结束之后不会再产生 `unknown`，只会有带证据的 `reconciled` 更正。
+- **较旧的观测不覆盖较新的。** 每个观测按其 PBS 查询开始的时间计（`state.observed_ts`）。查询开始得比已记录状态的那次查询更早的观测，直接丢弃。两次刷新同时进行时（例如 agent 的调用和 notifyd），先查询的可能后写入，照写会让状态倒退（running → held），并记下没有发生过的变化（11-05 审查时发现，有回归测试）。
+  - `submitted` 只由 qsub 的接受担保，按接受的时间计；`unknown` 还依赖更早的查询（活动表读取，可能还有 `qstat -f`），按其中最早的那次计。所以别的进程先记下了更晚的状态时，作业的第一个事件不是 `submitted`。
+  - 剩下的窗口：两次查询在时间上重叠时，PBS 回答的先后不一定与开始的先后一致；正好在这段时间里（通常不到一秒）发生的状态变化仍可能按错误的顺序记下，下一次刷新会纠正。登录节点之间比较的是各自的时钟，NTP 的偏差在毫秒级，影响与此相同。
+  - 带证据的 `reconciled` 更正不做这个比较。
 - `<host>` 是写入事件的那台登录节点，即事件里的 `observer`。
 - **`pbs_time`** 是 PBS 自己记录的事件时间（qtime、stime、obittime 等），导出时成为 `occurred_at`。
 

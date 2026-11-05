@@ -15,6 +15,7 @@ from unittest import mock
 from base import ROOT, FakePbsCase
 from miyabi_mcp import export, jobs
 from miyabi_mcp.ledger import Store
+from miyabi_mcp.pbs import Pbs
 from miyabi_mcp.util import Lock, MiyabiError, canonical
 
 LAUNCHER = ROOT / "bin" / "miyabi-mcp"
@@ -521,7 +522,7 @@ class PlacementAndExportTests(FakePbsCase):
         self.finish(job_id)
         self.ok_call("job_list")
         Store(self.settings()).apply(job_id, {"kind": "reconciled", "execution_state": "ended", "outcome": "failed",
-                                              "raw_state": "reconciled"}, "miyabi-mcp",
+                                              "raw_state": "reconciled"}, "miyabi-mcp", observed_ts=None,
                                      correction_of=f"miyabi-pbs:{job_id}:3", note="checked the log:\nloss was NaN")
         command = [str(LAUNCHER), "--project-dir", str(self.project), "ledger", "--format", "smooth-research", "--jsonl"]
         merged = self.project / "export.jsonl"
@@ -851,6 +852,48 @@ class LedgerEdgeTests(FakePbsCase):
         result = self.call("job_annotate", {"job_id": "3700000", "adopt": True, "verdict": {"status": "great"}})
         self.assertEqual(result["error"]["type"], "invalid_arguments")
         self.assertEqual(self.ok_call("ledger_query")["records"], [])
+
+
+class ObservationOrderTests(FakePbsCase):
+    """Two refreshes at once (an agent's call and notifyd): the one that queried PBS first may record last."""
+
+    def later_refresh_during_the_query(self, then):
+        """Pbs.detail whose first call takes PBS's answer, then lets a later refresh run to the end after `then`
+        moved the job on, and only then hands the earlier answer back."""
+        real, calls = Pbs.detail, []
+
+        def detail(pbs, ids, history=False):
+            answer = real(pbs, ids, history=history)
+            if not calls:
+                calls.append(list(ids))
+                for job_id in ids:
+                    then(job_id)
+                self.ok_call("job_list")  # queries after this one started, and records first
+            return answer
+
+        return mock.patch.object(Pbs, "detail", detail)
+
+    def kinds(self) -> list[str]:
+        return [event["kind"] for event in self.ok_call("ledger_query", {"format": "events"})["events"]]
+
+    def test_an_earlier_query_recording_last_does_not_take_the_state_back(self):
+        job_id = self.submit(name="x")["job_id"]
+        self.set_job(job_id, state="H")
+        with self.later_refresh_during_the_query(self.start):
+            self.ok_call("job_list")  # sees HELD and asks qstat -f (H); the later refresh records running first
+        record = self.ok_call("ledger_query", {"refresh": False})["records"][0]
+        self.assertEqual(record["state"]["execution_state"], "running")
+        self.assertEqual(self.kinds(), ["submitted", "running"])
+        self.finish(job_id)
+        self.ok_call("job_list")  # later queries still go through
+        self.assertEqual(self.kinds(), ["submitted", "running", "ended"])
+
+    def test_submitted_does_not_follow_a_later_observation(self):
+        with self.later_refresh_during_the_query(self.start):
+            job_id = self.submit(name="x")["job_id"]  # first_events asks qstat -f (Q); meanwhile running is recorded
+        record = self.ok_call("ledger_query", {"refresh": False})["records"][0]
+        self.assertEqual((record["job_id"], record["state"]["execution_state"]), (job_id, "running"))
+        self.assertEqual(self.kinds(), ["running"])
 
 
 class LockTests(unittest.TestCase):

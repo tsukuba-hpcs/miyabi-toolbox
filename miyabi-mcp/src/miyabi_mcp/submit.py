@@ -513,9 +513,11 @@ def bind_submission(settings: Settings, store: Store, record: dict, job_id: str,
 def first_events(settings: Settings, store: Store, job_id: str) -> list[dict]:
     """The `submitted` event, confirmed by one `qstat -f` when possible (DESIGN.md 7.3); nothing when the
     job already has events (a second bind of the same submission)."""
-    if (store.find(job_id) or {}).get("seq"):
+    record = store.find(job_id) or {}
+    if record.get("seq"):
         return []
     details = {}
+    queried = time.time()
     try:
         details = Pbs(settings).detail([job_id])
     except MiyabiError:
@@ -525,15 +527,18 @@ def first_events(settings: Settings, store: Store, job_id: str) -> list[dict]:
     if fields and fields.get("job_state") in {"Q", "H", "W", "T"}:
         observation = {"kind": "submitted", "execution_state": "queued", "outcome": "unknown",
                        "raw_state": fields["job_state"], "pbs_time": pbs_time(fields.get("qtime"))}
-        events.append(store.apply(job_id, observation, "qsub"))
+        events.append(store.apply(job_id, observation, "qsub", observed_ts=queried))
     else:
         observation = {"kind": "submitted", "execution_state": "queued", "outcome": "unknown",
                        "raw_state": "submitted", "pbs_time": None}
-        events.append(store.apply(job_id, observation, "qsub"))
+        # Only qsub's acceptance vouches for this one: date it then. Once the job is bound, another process may
+        # already have seen it run, and that later observation must stand.
+        accepted = float((record.get("submit") or {}).get("accepted_ts") or queried)
+        events.append(store.apply(job_id, observation, "qsub", observed_ts=accepted))
         if fields:
             later = states.from_detail(fields, history=False, cancel_requested=False,
                                        mig_hardware=settings.config.get("mig_hardware"))
-            events.append(store.apply(job_id, later, "qstat -f"))
+            events.append(store.apply(job_id, later, "qstat -f", observed_ts=queried))
     return [event for event in events if event]
 
 

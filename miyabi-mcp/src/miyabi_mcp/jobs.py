@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import sys
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -300,9 +301,11 @@ VERDICTS = {"unreviewed", "verified_success", "verified_failure"}
 
 def _adopt(settings: Settings, store: Store, job_id: str, args: dict) -> dict:
     pbs = Pbs(settings)
+    queried = time.time()
     details = pbs.detail([job_id])
     history = False
     if not details:
+        queried = time.time()
         details, history = pbs.detail([job_id], history=True), True
     key, fields = _match(details, job_id)
     if fields is None:
@@ -332,7 +335,7 @@ def _adopt(settings: Settings, store: Store, job_id: str, args: dict) -> dict:
                                 "submit_id": record["submit_id"], "name": record["name"]})
     observation = states.from_detail(fields, history=history, cancel_requested=False,
                                      mig_hardware=settings.config.get("mig_hardware"))
-    store.apply(key, observation, "qstat -H -f" if history else "qstat -f")
+    store.apply(key, observation, "qstat -H -f" if history else "qstat -f", observed_ts=queried)
     return store.find(key)
 
 

@@ -130,7 +130,10 @@ def refresh(store: Store, records: list[dict], snap: dict) -> list[dict]:
                 continue
             history_ids.append(job_id)
     events: list[dict] = []
+    # Each observation is dated by the start of its query, so that a concurrent refresh that queried later and
+    # finished first is not undone by this one (Store.apply).
     if detail_ids:
+        queried = time.time()
         details = pbs.detail(detail_ids)
         for job_id in detail_ids:
             fields = _match(details, job_id)
@@ -139,11 +142,14 @@ def refresh(store: Store, records: list[dict], snap: dict) -> list[dict]:
                 continue
             observation = states.from_detail(fields, history=False, cancel_requested=False,
                                              mig_hardware=mig_hardware)
-            event = store.apply(job_id, observation, "qstat -f")
+            event = store.apply(job_id, observation, "qstat -f", observed_ts=queried)
             if event:
                 events.append(event)
     if history_ids:
+        queried = time.time()
         details = pbs.detail(history_ids, history=True)
+        # `unknown` also rests on earlier queries (the table read, perhaps qstat -f): date it by the earliest.
+        absent_since = min(float(snap.get("observed_ts") or queried), queried)
         for job_id in history_ids:
             fields = _match(details, job_id)
             record = store.find(job_id) or {}
@@ -151,13 +157,15 @@ def refresh(store: Store, records: list[dict], snap: dict) -> list[dict]:
                 observation = states.from_detail(fields, history=True,
                                                  cancel_requested=bool(record.get("cancel_requested")),
                                                  mig_hardware=mig_hardware)
+                observed_ts = queried
             else:
                 missing = _missing_since(store, job_id)
                 if (datetime.now().astimezone() - missing).total_seconds() < float(settings.config.get("missing_s", 300)):
                     continue
                 observation = {"kind": "unknown", "execution_state": "unknown", "outcome": "unknown",
                                "raw_state": "not in active table or history", "pbs_time": None}
-            event = store.apply(job_id, observation, "qstat -H -f")
+                observed_ts = absent_since
+            event = store.apply(job_id, observation, "qstat -H -f", observed_ts=observed_ts)
             if event:
                 events.append(event)
     return events

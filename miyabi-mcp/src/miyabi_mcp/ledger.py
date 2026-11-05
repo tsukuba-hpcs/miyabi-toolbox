@@ -109,9 +109,16 @@ class Store:
             newest = max((path.stem for path in directory.glob("*.jsonl")), default="")
             append_line(directory / f"{max(month(event['observed_at']), newest)}.jsonl", compact(event))
 
-    def apply(self, job_id: str, observation: dict, source: str, *, correction_of: str | None = None,
-              note: str | None = None) -> dict | None:
-        """Record an observation as the next event when it changes the job's state. Returns the event."""
+    def apply(self, job_id: str, observation: dict, source: str, *, observed_ts: float | None,
+              correction_of: str | None = None, note: str | None = None) -> dict | None:
+        """Record an observation as the next event when it changes the job's state. Returns the event.
+
+        `observed_ts` is when the PBS query behind the observation started (None only for a correction, which
+        rests on evidence rather than a query). An observation whose query started before the one behind the
+        recorded state is older than that state and is dropped: two refreshes at once (an agent's call and
+        notifyd, say) can finish in either order, and the older one applied last would take the state back
+        (running -> held) and record changes that never happened.
+        """
         kind = observation["kind"]
         if kind == "reconciled" and not (correction_of and note):
             raise MiyabiError("invalid_arguments", "a reconciled event needs correction_of and note (the evidence)")
@@ -122,6 +129,8 @@ class Store:
             last = record.get("state") or {}
             if kind != "reconciled":
                 if last.get("execution_state") == "ended":
+                    return None
+                if observed_ts is not None and observed_ts < float(last.get("observed_ts") or 0):
                     return None
                 if (observation["execution_state"], observation["raw_state"]) == (
                         last.get("execution_state"), last.get("raw_state")):
@@ -144,6 +153,9 @@ class Store:
             before = copy.deepcopy(record)
             record["seq"] = seq
             record["state"] = {key: event.get(key) for key in STATE_KEYS}
+            stamps = [stamp for stamp in (observed_ts, last.get("observed_ts")) if stamp is not None]
+            if stamps:
+                record["state"]["observed_ts"] = max(stamps)
             # Where the job ran, raw: a later observation without these fields keeps the earlier values.
             placement = {**(last.get("pbs") or {}), **(event.get("pbs") or {})}
             if placement:
