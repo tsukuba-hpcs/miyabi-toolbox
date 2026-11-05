@@ -9,7 +9,7 @@
 3. **运行环境。** 服务运行在 `miyabi-mcp/.venv` 中（uv 管理，Python ≥ 3.11）。在 Miyabi 上以系统自带的 `/usr/bin/python3.11` 为基础建 venv，不下载解释器，也不往 `$HOME` 写。MCP 协议层用官方 Python SDK，核心逻辑只用标准库。每个工具都有对应的 CLI 子命令，输出同一份 JSON，所以只有 shell 的 agent（例如经 pi-env-mcp 的 `bash`）也能用。
 4. **v0.1 覆盖前五项需求**：查询（`pbs_context`、`pbs_queues`、`job_list`、`job_get`）；提交（`job_submit`，先 dry-run 出计划，再凭计划摘要提交）；取消（`job_cancel`）；记录与管理（作业台账、事件日志、查询与导出）；通知（`job_wait` 有界等待；作业组通知、agent 所在机器上的 daemon 投递、确认）。第六项（pilot 占位排队与任务打包）排在 v0.3。
 5. **通知（原称"唤醒"）。** agent 等作业时可能正在做别的事，所以这里是"通知"而不是"唤醒"。
-   - agent 每次登记或加入通知后，都在自己所在的机器上运行返回的命令（`ensure` 是幂等的，不以"已在运行"为由跳过，9.3）。daemon 按 `notify_poll_seconds`（默认 60 秒）经 miyabi-mcp poll；条件判定仍在登录节点完成（共享的 qstat 快照加台账），投递在本机进行：Claude Code 用后台 listener，另有 herdr、tmux、codex_queue、具名命令和文件。
+   - agent 每次登记或加入通知后，都在自己所在的机器上运行返回的命令（`ensure` 是幂等的，不以"已在运行"为由跳过，9.3）。daemon 按 `notify_poll_seconds`（默认 180 秒）经 miyabi-mcp poll；条件判定仍在登录节点完成（共享的 qstat 快照加台账），投递在本机进行：Claude Code 用后台 listener，另有 herdr、tmux、codex_queue、具名命令和文件。
    - 一个通知可以绑定一组作业（如多个 seed），全部结束后发一条汇总通知；可选在任一成员失败时提前通知。
    - 通知通道中断（ssh 断开等）本身也会通知 agent，不会静默。
 6. **台账。** 每个作业一份 JSON 记录，另有按月追加的事件日志。台账、脚本快照、PBS 日志等必须留在 Miyabi 上的产出，都放在项目目录下的 `.miyabi-mcp/` 中。项目目录默认是 `/work/<group>/<user>/<project>`，用户也可以另行指定。写入用原子 rename 和跨节点安全的锁文件。不用 SQLite，因为几台登录节点（g1、g2、g3）上可能同时有多个写者。事件可以 1:1 导出为 smooth-research 的 Observation/Usage。
@@ -164,7 +164,7 @@
 │                               │            │        │                                   │
 │  MCP miyabi-g (pi-env-mcp) ───┼─ C ───────▶│ pi-env daemon ──▶ bash: miyabi-mcp <cmd>   │
 │                               │            │        │                                   │
-│  notifyd: ssh … notify poll ──┼───────────▶│ miyabi-mcp notify poll（默认每 60 秒）      │
+│  notifyd: ssh … notify poll ──┼───────────▶│ miyabi-mcp notify poll（默认每 180 秒）      │
 └───────────────────────────────┘ 同一个      │        ▼                                   │
                                  ControlMaster│ /work 上的共享状态：                        │
  登录节点上的 agent ── A: stdio ──────────────▶│ <project>/.miyabi-mcp（台账、通知、日志）   │
@@ -648,7 +648,7 @@ runner 对可捕获的断开信号尝试取消自己的作业；终端不支持�
 
 ```
 Miyabi 登录节点（miyabi-mcp）                         agent 所在机器（notifyd，由 agent 启动）
- 项目台账：通知记录、作业事件    ◀── notify poll（默认每 60 秒）  daemon
+ 项目台账：通知记录、作业事件    ◀── notify poll（默认每 180 秒）  daemon
  共享 qstat 快照、条件判定       ─── 已触发的通知 ─────────────▶  本机投递：listener / herdr / tmux /
                                 ◀── notify report ─────────────          codex_queue / command / file
 ```
@@ -657,7 +657,7 @@ Miyabi 登录节点（miyabi-mcp）                         agent 所在机器�
 - **投递在 agent 所在机器。** daemon 在本机投递，再把结果报告回去。
 - **daemon 由 agent 启动。** 每次登记或加入通知后，agent 都运行返回的命令：`start_command`（`notifyd ensure`），或 listener 的 `listen_command`（它也会 ensure）。ensure 只看本机的状态文件和 pid，已在运行就直接返回，否则在后台启动，所以 agent 不以服务端报告的"在运行"为由跳过（11-05 定，D3）。没有未完成的通知时，daemon 再 poll 两次后报告退出并自行退出，不留常驻进程（9.3）。
 - **每台机器、每个用户一个 daemon。** 它的名字（notifier）默认是本机短主机名，服务端按名字分派通知。在登录节点上 daemon 直接调用 miyabi-mcp；在工作站上经 `ssh -o BatchMode=yes <alias> <launcher> notify poll …`，复用 ControlMaster。
-- **频率。** 用户级 `config.json` 的 `notify_poll_seconds`（默认 60 s）是唯一来源：服务端把它写进返回的 `start_command` 和 `listen_command`（`--poll-seconds`），daemon 在心跳里报告实际间隔，与配置不一致时 `daemon_info` 标出来。已在运行的 daemon 保持原间隔，直到退出或 `notifyd stop`；ensure 不假装已经换了配置。再短没有意义：共享 qstat 快照最长用 60 s 前的（`poll_max_age_s`），作业提交后 120 s 内不查历史，poll 失败时还会退避。不按 walltime 自适应：walltime 只是上限，作业提前结束或失败时更需要及时报告。60 s 是 11-05 定的（D4），此前是 300 s，实测检测延迟中位 192 s；上线第一周记录 qstat 调用次数和检测延迟，调用量有问题就改成 120 s。
+- **频率。** 用户级 `config.json` 的 `notify_poll_seconds`（默认 180 s）是唯一来源：服务端把它写进返回的 `start_command` 和 `listen_command`（`--poll-seconds`），daemon 在心跳里报告实际间隔，与配置不一致时 `daemon_info` 标出来。已在运行的 daemon 保持原间隔，直到退出或 `notifyd stop`；ensure 不假装已经换了配置。间隔再短也意义有限：共享 qstat 快照最长用 60 s 前的（`poll_max_age_s`），作业提交后 120 s 内不查历史，poll 失败时还会退避。不按 walltime 自适应：walltime 只是上限，作业提前结束或失败时更需要及时报告。11-05 先定为 60 s（D4），此前是 300 s，实测检测延迟中位 192 s；同日改为 180 s，减少 qstat 调用。
 
 ### 9.2 通知与作业组
 

@@ -219,9 +219,9 @@ class StateTests(NotifyCase):
     def test_commands_carry_the_configured_interval(self):
         job_id = self.submit()["job_id"]
         daemon = self.ok_call("notify_create", {"job_ids": [job_id], "notifier": "laptop"})["daemon"]
-        self.assertEqual(daemon["poll_seconds"], 60)
-        self.assertIn("--poll-seconds 60", daemon["start_command"])
-        self.assertIn("--poll-seconds 60", daemon["listen_command"])
+        self.assertEqual(daemon["poll_seconds"], 180)
+        self.assertIn("--poll-seconds 180", daemon["start_command"])
+        self.assertIn("--poll-seconds 180", daemon["listen_command"])
         config = self.user_root / ".miyabi-mcp" / "config.json"
         config.write_text(json.dumps({**self.user_config, "notify_poll_seconds": 120}))
         self.assertIn("--poll-seconds 120", self.ok_call("notify_list")["daemons"][0]["start_command"])

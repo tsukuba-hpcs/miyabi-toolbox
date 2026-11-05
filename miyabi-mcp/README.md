@@ -272,7 +272,7 @@ notification is no longer open for that notifier. With 3 the text says why: it w
 delivered and taken from this machine's inbox at a given time (delivered means written to the inbox, not
 read); or it belongs to another notifier (`notify_list` shows which).
 
-The daemon polls the login node every `notify_poll_seconds` (user-level `config.json`, default 60; the server
+The daemon polls the login node every `notify_poll_seconds` (user-level `config.json`, default 180; the server
 writes it into the returned commands), delivers locally and reports back. With nothing left it polls twice
 more, reports its exit and exits; a running daemon keeps the interval it started with. `notify_create` and
 `notify_list` show the daemon's `state`: `running`, `idle_exited` (normal when nothing is open), `stopped`,

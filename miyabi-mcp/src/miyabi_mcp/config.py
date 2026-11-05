@@ -28,7 +28,7 @@ DEFAULT_COMMANDS = {
     "git": "/usr/bin/git",
 }
 # How often a notification daemon polls; the server writes it into the commands it returns (notify_poll_seconds).
-NOTIFY_POLL_SECONDS = 60
+NOTIFY_POLL_SECONDS = 180
 DEFAULT_CONFIG = {
     "remote_alias": "miyabi-g",
     "notify_poll_seconds": NOTIFY_POLL_SECONDS,
