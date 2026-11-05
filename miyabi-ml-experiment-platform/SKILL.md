@@ -1,6 +1,6 @@
 ---
 name: miyabi-ml-experiment-platform
-description: Design, build or audit the platform that runs ML experiments (train → evaluate → statistics) on Miyabi-G PBS — late-binding pilot jobs, a single-writer controller, walltime from measured smoke runs, cost gates, in-place evaluation, artifact retention under byte and file-count quotas, streaming statistics, science versions — and plan experiments on it. Use when setting up or redesigning an experiment system or pipeline on Miyabi; planning a training/evaluation/HPO study there (stages, seeds, smoke, target-scale trials or pilot studies, stop rules, cost estimates); choosing job shapes, queues, walltime or job packing; deciding what to save, clean or tabulate; or diagnosing slow, idle or wasteful Miyabi experiments, even if only one of these is named. Also 在Miyabi上搭建/改造实验框架、实验平台、实验流程、冒烟、成本估算、walltime、作业打包、评测、清理、统计. Not for raw qsub/qstat syntax (miyabi-pbs-cmd), one job script (miyabi-pbs-shell-template) or waiting on a job (miyabi-pbs-goal-wakeup).
+description: Design, build or audit the platform that runs ML experiments (train → evaluate → statistics) on Miyabi-G PBS — late-binding pilot jobs, a single-writer controller, walltime from measured smoke runs, cost gates, in-place evaluation, artifact retention under byte and file-count quotas, streaming statistics, science versions — and plan experiments on it. Use when setting up or redesigning an experiment system or pipeline on Miyabi; planning a training/evaluation/HPO study there (stages, seeds, smoke, target-scale trials or pilot studies, stop rules, cost estimates); choosing job shapes, queues, walltime or job packing; deciding what to save, clean or tabulate; or diagnosing slow, idle or wasteful Miyabi experiments, even if only one of these is named. Also 在Miyabi上搭建/改造实验框架、实验平台、实验流程、冒烟、成本估算、walltime、作业打包、评测、清理、统计. Not for submitting, querying or waiting on single jobs (miyabi-mcp) or for one job script (miyabi-pbs-shell-template).
 ---
 
 # Miyabi ML Experiment Platform
@@ -14,11 +14,11 @@ applies to your case; "one study" means one of those experiments. Most
 measurements come from 11-node jobs (one coordinator and ten workers) and
 1-node jobs.
 
-The skill stands alone. When the sibling skills are installed they supply the
-mechanics: `miyabi-pbs-cmd` (qstat/qsub dialect, the compute-node guard),
-`miyabi-pbs-shell-template` (job scripts, modules, `mpirun`) and
-`miyabi-pbs-goal-wakeup` (sleeping through long jobs). Without them, use the
-commands given here and in the references.
+The skill stands alone. When the siblings are available they supply the
+mechanics: miyabi-mcp (queues, submission, job state and notifications),
+`miyabi-pbs-shell-template` (job scripts, modules, `mpirun`) and the
+compute-node guard `miyabi-pbs-cmd/scripts/context.py` in the miyabi-toolbox
+checkout. Without them, use the commands given here and in the references.
 
 No implementation ships with the skill: the operator commands named below
 (`apply`, `release`, `loop`, `status`, `estimate`, `hold`, …) are the ones
@@ -221,7 +221,7 @@ Then run it ([experiment-lifecycle.md](references/experiment-lifecycle.md)):
 11. Resume the next stage under one `loop`; follow `status` and `estimate`
     only. Wake on state changes, not on short timers: a watcher that wakes the
     session when `status` changes (in Claude Code, a background command that
-    exits on a change), `miyabi-pbs-goal-wakeup` for one long job, and a long
+    exits on a change), a miyabi-mcp notification for one long job, and a long
     timer only as a fallback.
 12. Formal runs evaluate in place what uses the allocation (short, sharded or
     laned work) and send long serial tails to 1-node pilots; statistics read

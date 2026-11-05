@@ -1,5 +1,9 @@
 # Miyabi PBS Commands
 
+**Deprecated (2026-11-05):** use [miyabi-mcp](../miyabi-mcp/README.md); see the notice
+in [SKILL.md](SKILL.md). `scripts/context.py` remains the job-side guard of the shell
+templates.
+
 Start with [SKILL.md](SKILL.md) for operations and reference routing. The skill
 contains two Python standard-library helpers. Shell examples and their tests live
 in [miyabi-pbs-shell-template](../miyabi-pbs-shell-template/SKILL.md).

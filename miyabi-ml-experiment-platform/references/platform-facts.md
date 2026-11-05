@@ -22,7 +22,7 @@ are from 11-node jobs (one coordinator and ten workers) and 1-node jobs.
 | `/local` | node-local NVMe, ~900 GB (965 GB free on mg0016); job scratch only. PBS also exports `LOCALDIR=/local/<job>.<n>` (observed 2026-10-20; whether the site empties it at job end is unverified, so the platform uses its own `/local/$USER/<pkg>/<job>` and removes it) | `df -h /local` inside a job |
 | `/work` | Lustre. Quotas per project group, in bytes and in files, shared by all of the group's projects (one group, 2026-10-16: 27 TB and 56.62 M files) | `lfs quota -g <group> /work`; `lfs quota -u $USER /work` |
 | Lustre semantics | plain `rename` is atomic; `renameat2(RENAME_NOREPLACE)` is not supported; `os.link` fails when the target exists, so it works as create-if-absent across nodes (claims) | — |
-| Login nodes (`miyabi-g*`) | file edits, light metadata, PBS operations, `uv` venv sync from wheels. Not: `import torch`, test suites, compiles, `du`/`find` over large trees | `miyabi-pbs-cmd` `context.py` |
+| Login nodes (`miyabi-g*`) | file edits, light metadata, PBS operations, `uv` venv sync from wheels. Not: `import torch`, test suites, compiles, `du`/`find` over large trees | miyabi-mcp `allocation_check` run in that shell; `context.py` (miyabi-toolbox checkout) in job scripts |
 | Model files | jobs do not download: fill a shared `HF_HOME` on /work from the login node, pin revisions, set `HF_HUB_OFFLINE=1` in jobs | — |
 | GPU telemetry | `qstat -H -f` keeps per-node average and maximum GPU utilization, memory and power for finished jobs. Utilization and power seem to cover only about the **last hour** of a job (inferred 2026-10-20: in an 11-node job whose worker GPUs trained for the first 29 of 112 min at 31 GB, eight of them record maximum utilization 0); memory peaks cover the whole job | `scripts/pbs_time_report.py` summarizes them; for longer jobs, measure idle time from task timelines |
 
@@ -87,7 +87,7 @@ MIYABI_ML_PLATFORM_ROOT=/absolute/path/to/miyabi-ml-experiment-platform
 
 | Symptom | Fix |
 | --- | --- |
-| `qstat <id>` exits 0 after the job has ended ("No unfinished job found."), so wait loops never end | judge liveness from the job table: `qstat -f` for current jobs, `qstat -H -f` for history, or `miyabi-pbs-cmd`'s `qstat_json.py`; grep for the ID |
+| `qstat <id>` exits 0 after the job has ended ("No unfinished job found."), so wait loops never end | judge liveness from the job table: miyabi-mcp `job_get`, or `qstat -f` for current jobs and `qstat -H -f` for history, grepping for the ID |
 | A bad node: mg0882 gave CUDA illegal memory access five times (2026-10) and wasted 11-node runs | before claiming work, check the whole `PBS_NODEFILE`; on a hit, resubmit the same script and resources once, write a receipt, exit 79; never count it as a scientific failure |
 | PBS writes `-j oe` output to the `qsub` working directory; a job submitted from `/tmp` (an agent scratchpad) lost its output | submit from `<R>/control/pbs/`, or pass `-o` with a /work path |
 | PyTorch Inductor on aarch64 needs a compiler that builds SVE2 kernels | GCC toolset 14 (`/opt/rh/gcc-toolset-14/root/usr/bin/{gcc,g++}`) as `CC`/`CXX`, with its `lib64` and `lib` on `LD_LIBRARY_PATH` and `LIBRARY_PATH` |

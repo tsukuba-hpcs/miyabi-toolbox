@@ -61,10 +61,11 @@ def block(number, job, server):
              f"    Resource_List.walltime = {job['walltime']}",
              f"    Output_Path = miyabi-g1:{job['output']}"]
     if job.get("stime"):
-        lines += [f"    stime = {stamp(job['stime'])}",
-                  "    exec_host = mg0001/0*72",
-                  f"    exec_vnode = (mg0001:mem=104857600kb:ncpus=72:ngpus=1:{vnode_kind}={job['units']})",
-                  f"    resources_used.walltime = {job.get('used') or '00:00:10'}"]
+        lines.append(f"    stime = {stamp(job['stime'])}")
+        if job.get("placement", True):  # placement=false: a record without exec_host/exec_vnode
+            lines += ["    exec_host = mg0001/0*72",
+                      f"    exec_vnode = (mg0001:mem=104857600kb:ncpus=72:ngpus=1:{vnode_kind}={job['units']})"]
+        lines.append(f"    resources_used.walltime = {job.get('used') or '00:00:10'}")
     if job["state"] == "F":
         lines.append(f"    obittime = {stamp(job['obittime'])}")
         if job.get("exit_status") is not None:

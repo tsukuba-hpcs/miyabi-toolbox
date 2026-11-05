@@ -9,7 +9,7 @@
 set -eEuo pipefail
 trap 'echo "[ERROR] Failed at line $LINENO" >&2' ERR
 
-# Absolute installed miyabi-pbs-cmd directory (provides the context guard).
+# Absolute miyabi-pbs-cmd directory of the miyabi-toolbox checkout (provides the context guard).
 MIYABI_PBS_CMD_ROOT="<absolute_miyabi-pbs-cmd_directory>"
 TARGET_SYSTEM="<Miyabi-G_or_Miyabi-C>"
 /usr/bin/python3 -I "$MIYABI_PBS_CMD_ROOT/scripts/context.py" \

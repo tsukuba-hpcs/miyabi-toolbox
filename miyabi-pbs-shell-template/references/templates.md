@@ -4,11 +4,16 @@ Choose an example from the [skill's template table](../SKILL.md).
 
 ## Fill And Check
 
-- Select queue, group and resources using
-  [qsub.md](../../miyabi-pbs-cmd/references/qsub.md). PBS directives require
-  literal values; shell variables are not expanded there.
-- Set `MIYABI_PBS_CMD_ROOT` to the absolute installed `miyabi-pbs-cmd`
-  directory (not this skill's directory); it supplies `scripts/context.py`.
+- Select queue, group and resources with miyabi-mcp's `pbs_queues`; the
+  `job_submit` dry run checks the filled script (`select`, placeholders, `cd`)
+  and the project's policy (see
+  [batch job scripts](../../miyabi-mcp/README.md#batch-job-scripts)). PBS
+  directives require literal values; shell variables are not expanded there.
+- Set `MIYABI_PBS_CMD_ROOT` to the absolute `miyabi-pbs-cmd` directory of the
+  miyabi-toolbox checkout (for example
+  `/work/<group>/<user>/miyabi-toolbox/miyabi-pbs-cmd`), not this skill's
+  directory or an agent's skills link; it supplies `scripts/context.py`. The
+  skill is deprecated; the guard is not.
   Set the project root, target modules and actual entrypoint/argv separately.
   Replace or remove every `<...>` placeholder, preserving quoted argument
   arrays. `grep -n '<[A-Za-z]' <script>` lists any placeholders that remain.
@@ -39,7 +44,8 @@ From this skill directory, run:
 ```
 
 These offline regressions check shell syntax, context refusal and simulated
-launcher boundaries. They require the sibling `miyabi-pbs-cmd` installation.
+launcher boundaries. They use `miyabi-pbs-cmd/scripts/context.py` from the same
+checkout.
 They do not test PBS scheduling, module availability, Python ABI, CUDA/NCCL or
 distributed communication. The
 G login probe validates refusal only; no live C allocation or distributed run

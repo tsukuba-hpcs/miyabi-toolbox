@@ -5,9 +5,12 @@ import os
 import socket
 import subprocess
 import time
+from datetime import timedelta
+from unittest import mock
 
 from base import ROOT, FakePbsCase
-from miyabi_mcp import notify
+from miyabi_mcp import deliver as delivery, notify, notifyd
+from miyabi_mcp.util import Lock, MiyabiError, now, read_json, write_json
 
 LAUNCHER = ROOT / "bin" / "miyabi-mcp"
 HOST = socket.gethostname().split(".", 1)[0]
@@ -76,11 +79,15 @@ class GroupTests(NotifyCase):
         [early] = self.deliver_all(self.poll())
         self.assertEqual(early["kind"], "early")
         self.assertIn(f"job {jobs[0]} failed", early["message"])
+        # Acknowledging an early message would close the group before its final message: no token in it.
+        self.assertNotIn("notify_ack(", early["message"])
+        self.assertIn("needs no acknowledgment", early["message"])
         self.assertEqual(self.poll()["messages"], [])
         self.finish(jobs[1])
         [final] = self.deliver_all(self.poll())
         self.assertEqual(final["kind"], "final")
         self.assertIn("F Exit_status=1 (failed)", final["message"])
+        self.assertIn("notify_ack(", final["message"])
 
     def test_sealed_group_refuses_more_jobs(self):
         self.group(1)
@@ -138,10 +145,16 @@ class DaemonTests(NotifyCase):
         deadline = time.time() + 20
         while time.time() < deadline:
             status = json.loads(self.run_cli("notifyd", "status", "--notifier", HOST).stdout)
-            if not status["running"]:
+            if not status["running"] and status["state"]["status"] != "exiting":
                 break
             time.sleep(0.5)
         self.assertEqual(status["state"]["status"], "exited_idle")
+        self.assertEqual(status["state"]["started_by"], "listen")
+        closed = read_json(self.user_root / ".miyabi-mcp" / "notifyd" / f"closed-{HOST}.json")
+        self.assertEqual(closed[notification]["status"], "delivered")
+        [daemon] = self.ok_call("notify_list")["daemons"]
+        self.assertEqual((daemon["state"], daemon["exited"]["reason"]), ("idle_exited", "idle"))
+        self.assertNotIn("hint", daemon)  # nothing is open: resting is normal
 
     def test_remote_mode_through_ssh(self):
         fake_ssh = self.bin / "fake-ssh"
@@ -163,6 +176,9 @@ class DaemonTests(NotifyCase):
         self.assertEqual(self.ok_call("notify_list")["notifications"][0]["status"], "delivered")
         state = json.loads(self.run_cli("notifyd", "status", "--notifier", "laptop").stdout)["state"]
         self.assertEqual(state["failures"], 0)
+        # The interval and the idle exit reached the server through ssh.
+        daemon = notify.daemon_info(self.settings(), "laptop")
+        self.assertEqual((daemon["state"], daemon["daemon_poll_seconds"]), ("idle_exited", 1))
 
     def test_broken_channel_is_announced(self):
         broken = self.bin / "broken-ssh"
@@ -197,6 +213,203 @@ class DaemonTests(NotifyCase):
         args = record.read_text().splitlines()
         self.assertEqual(args[:3], ["agent", "prompt", "worker-1"])
         self.assertIn("all 1 jobs ended", "\n".join(args[3:]))
+
+
+class StateTests(NotifyCase):
+    def test_commands_carry_the_configured_interval(self):
+        job_id = self.submit()["job_id"]
+        daemon = self.ok_call("notify_create", {"job_ids": [job_id], "notifier": "laptop"})["daemon"]
+        self.assertEqual(daemon["poll_seconds"], 60)
+        self.assertIn("--poll-seconds 60", daemon["start_command"])
+        self.assertIn("--poll-seconds 60", daemon["listen_command"])
+        config = self.user_root / ".miyabi-mcp" / "config.json"
+        config.write_text(json.dumps({**self.user_config, "notify_poll_seconds": 120}))
+        self.assertIn("--poll-seconds 120", self.ok_call("notify_list")["daemons"][0]["start_command"])
+        notify.poll(self.settings(), "laptop", "test", interval=120, instance="a")
+        info = self.ok_call("notify_list")["daemons"][0]
+        self.assertEqual((info["state"], info["daemon_poll_seconds"]), ("running", 120))
+        self.assertNotIn("note", info)
+        notify.poll(self.settings(), "laptop", "test", interval=300, instance="a")
+        self.assertIn("polls every 300 s", self.ok_call("notify_list")["daemons"][0]["note"])
+
+    def test_idle_exit_is_reported_and_hinted_only_with_open_work(self):
+        notify.poll(self.settings(), "laptop", "test", interval=60, instance="A")
+        notify.poll(self.settings(), "laptop", "test", interval=60, instance="A", exiting="idle")
+        resting = notify.daemon_info(self.settings(), "laptop")
+        self.assertEqual((resting["state"], resting["daemon_running"]), ("idle_exited", False))
+        self.assertNotIn("hint", resting)
+        job_id = self.submit()["job_id"]
+        made = self.ok_call("notify_create", {"job_ids": [job_id], "notifier": "laptop"})
+        self.assertEqual(made["daemon"]["state"], "idle_exited")
+        self.assertIn("exited after polling", made["daemon"]["hint"])
+        self.assertIn("listen_command", made["next"])
+        self.assertEqual(self.ok_call("notify_list")["summary"]["daemons"], {"laptop": "idle_exited"})
+        notify.poll(self.settings(), "laptop", "test", interval=60, instance="B")
+        # A late exit report of the old daemon does not hide its successor.
+        notify.poll(self.settings(), "laptop", "test", interval=60, instance="A", exiting="stopped")
+        running = notify.daemon_info(self.settings(), "laptop")
+        self.assertEqual(running["state"], "running")
+        self.assertNotIn("hint", running)
+
+    def test_exit_report_sees_a_notification_registered_meanwhile(self):
+        job_id = self.submit()["job_id"]
+        self.ok_call("notify_create", {"job_ids": [job_id], "notifier": "laptop"})
+        report = notify.poll(self.settings(), "laptop", "test", interval=60, instance="A", exiting="idle")
+        self.assertEqual(report["open_count"], 1)  # the daemon resumes instead of leaving it stranded
+
+    def test_project_errors_still_count_open_notifications(self):
+        job_id = self.submit(notify={"notifier": "laptop"})["job_id"]
+        (self.project / ".miyabi-mcp" / "jobs" / job_id.split(".")[0]).unlink()
+        result = self.poll("laptop")
+        self.assertEqual(result["open_count"], 1)
+        self.assertEqual(len(result["targets"]), 1)
+        self.assertEqual(result["errors"][0]["type"], "not_in_ledger")
+        daemon = notify.daemon_info(self.settings(), "laptop")
+        self.assertIsNone(daemon["last_ok"])
+        self.assertEqual(daemon["errors"][0]["type"], "not_in_ledger")
+
+    def test_unknown_member_does_not_end_the_group(self):
+        jobs = self.group(2)
+        self.finish(jobs[0])
+        state = self.read_state()
+        del state["jobs"][jobs[1].split(".")[0]]
+        self.write_state(state)
+        [notice] = self.deliver_all(self.poll())
+        self.assertEqual(notice["kind"], "unknown")
+        self.assertIn(f"job {jobs[1]} is neither active nor in PBS history", notice["message"])
+        self.assertNotIn("notify_ack(", notice["message"])
+        self.assertEqual(self.poll()["messages"], [])
+        self.assertEqual(self.ok_call("notify_list")["notifications"][0]["status"], "open")
+        waited = self.ok_call("job_wait", {"job_ids": jobs, "timeout_s": 1})
+        self.assertFalse(waited["met"])
+        self.assertIn(f"state unknown for {jobs[1]}", waited["next"])
+        self.assertIn("state-unknown message was already sent", waited["notifications"][0]["next"])
+
+    def test_delivered_notification_can_be_dismissed_without_token(self):
+        [job_id] = self.group(1)
+        self.finish(job_id)
+        [final] = self.deliver_all(self.poll())
+        token = final["message"].split('ack_token="')[1].split('"')[0]
+        item = self.ok_call("notify_list")["notifications"][0]
+        self.assertEqual(self.ok_call("notify_list")["summary"]["delivered_unacknowledged"], 1)
+        waited = self.ok_call("job_wait", {"job_ids": [job_id], "timeout_s": 1})
+        self.assertTrue(waited["met"])
+        [entry] = waited["notifications"]
+        self.assertEqual(entry["status"], "delivered")
+        self.assertIn("notify_cancel", entry["next"])
+        self.assertNotIn(token, json.dumps(waited))
+        dismissed = self.ok_call("notify_cancel", {"id": item["id"], "reason": "outputs already read"})
+        self.assertEqual(dismissed["notification"]["status"], "dismissed")
+        stored = read_json(self.project / ".miyabi-mcp" / "notifications" / f"{item['id']}.json")
+        self.assertNotIn("acknowledged_at", stored)
+        self.assertEqual(stored["dismissal_reason"], "outputs already read")
+        listed = self.ok_call("notify_list")
+        self.assertEqual(listed["summary"]["delivered_unacknowledged"], 0)
+        self.assertEqual(listed["notifications"][0]["closed_at"], stored["history"][-1]["at"])
+        self.assertEqual(self.call("notify_cancel", {"id": item["id"]})["error"]["type"], "invalid_state")
+
+
+class DaemonLifecycleTests(NotifyCase):
+    def setUp(self):
+        super().setUp()
+        os.environ["MIYABI_MCP_NOTIFYD_DIR"] = str(self.user_root / "notifyd-local")
+        self.addCleanup(os.environ.pop, "MIYABI_MCP_NOTIFYD_DIR", None)
+        self.opts = notifyd.Options(notifier="box", poll_seconds=1)
+        self.paths = notifyd._paths(self.opts)
+        self.paths["dir"].mkdir(parents=True)
+
+    def hand_over(self, result=None, error=None, successor=False):
+        lock = Lock(self.paths["lock"], lease=60, timeout=0).acquire()
+        state = {"status": "running", "pid": os.getpid(), "host": notifyd.short_host()}
+
+        def report(opts, instance=None, exiting=None):
+            self.assertEqual(exiting, "idle")
+            self.assertEqual(read_json(self.paths["state"])["status"], "exiting")
+            self.assertFalse(self.paths["lock"].exists())  # free before the server hears of the exit
+            if successor:
+                Lock(self.paths["lock"], lease=60, timeout=0).acquire()
+            if error:
+                raise error
+            return result
+
+        with mock.patch.object(notifyd, "poll", report):
+            leave = notifyd._hand_over(self.opts, self.paths, lock, state, "A")
+        return leave, lock, read_json(self.paths["state"])
+
+    def test_idle_daemon_leaves_holding_the_lock_for_its_last_state(self):
+        leave, lock, _state = self.hand_over({"open_count": 0, "messages": [], "errors": []})
+        self.assertTrue(leave)
+        self.assertIsNotNone(lock.token)
+
+    def test_work_at_the_exit_report_resumes(self):
+        for result in ({"open_count": 1, "messages": [], "errors": []},
+                       {"open_count": 0, "messages": [], "errors": [{"project": "p"}]}):
+            leave, lock, state = self.hand_over(result)
+            self.assertFalse(leave)
+            self.assertEqual(state["status"], "running")
+            lock.release()
+        leave, lock, _state = self.hand_over(error=MiyabiError("transport", "ssh failed"))
+        self.assertFalse(leave)
+        lock.release()
+
+    def test_successor_keeps_its_lock_and_state(self):
+        leave, lock, state = self.hand_over({"open_count": 1, "messages": [], "errors": []}, successor=True)
+        self.assertTrue(leave)
+        self.assertIsNone(lock.token)
+        self.assertEqual(state["status"], "exiting")  # untouched: the successor writes its own
+
+    def test_listener_exit_names_the_reason(self):
+        write_json(self.paths["closed"], {
+            "N-c": {"status": "cancelled", "at": "2026-11-05T10:00:00+09:00", "delivered_at": None},
+            "N-d": {"status": "acknowledged", "at": "2026-11-05T11:00:00+09:00",
+                    "delivered_at": "2026-11-05T10:30:00+09:00"}})
+        box = delivery.inbox(self.paths["dir"], "N-d")
+        box.mkdir(parents=True)
+        (box / "N-d_1.shown").write_text("{}")
+        cancelled = notifyd._gone("N-c", self.opts, self.paths, delivery.inbox(self.paths["dir"], "N-c"))
+        self.assertIn("cancelled at 2026-11-05T10:00:00+09:00", cancelled)
+        taken = notifyd._gone("N-d", self.opts, self.paths, box)
+        self.assertIn("delivered at 2026-11-05T10:30:00+09:00", taken)
+        self.assertIn("does not mean an agent read it", taken)
+        self.assertIn("then acknowledged at 2026-11-05T11:00:00+09:00", taken)
+        self.assertIn("a listener took its last message at", taken)
+        stranger = notifyd._gone("N-x", self.opts, self.paths, delivery.inbox(self.paths["dir"], "N-x"))
+        self.assertIn("notify_list shows each notification's notifier", stranger)
+
+    def test_old_closed_inboxes_are_removed(self):
+        old, recent = (now() - timedelta(days=8)).isoformat(), now().isoformat()
+        closed = {"N-a": {"status": "acknowledged", "at": old}, "N-b": {"status": "delivered", "at": old},
+                  "N-c": {"status": "dismissed", "at": recent}, "N-d": {"status": "cancelled", "at": old}}
+        for key in closed:
+            delivery.inbox(self.paths["dir"], key).mkdir(parents=True)
+        notifyd._clean_inboxes(self.paths, closed)
+        self.assertEqual(sorted(p.name for p in (self.paths["dir"] / "inbox").iterdir()), ["N-b", "N-c"])
+
+
+class DaemonErrorTests(NotifyCase):
+    def run_cli(self, *args, timeout=60) -> subprocess.CompletedProcess:
+        return subprocess.run([str(LAUNCHER), *args], capture_output=True, text=True, timeout=timeout)
+
+    def test_project_error_never_counts_as_idle(self):
+        job_id = self.submit(notify={"notifier": HOST})["job_id"]
+        (self.project / ".miyabi-mcp" / "jobs" / job_id.split(".")[0]).unlink()  # this project's refresh fails
+        daemon = subprocess.Popen([str(LAUNCHER), "notifyd", "run", "--notifier", HOST, "--poll-seconds", "1",
+                                   "--idle-polls", "1"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        time.sleep(5)
+        self.assertIsNone(daemon.poll())
+        self.run_cli("notifyd", "stop", "--notifier", HOST)
+        _out, err = daemon.communicate(timeout=30)
+        self.assertEqual(daemon.returncode, 0, err)
+        log = self.user_root / ".miyabi-mcp" / "notifyd" / f"{HOST}.log"
+        events = [json.loads(line) for line in log.read_text().splitlines() if line.startswith("{")]
+        names = [event["event"] for event in events]
+        self.assertEqual(names[0], "started")
+        self.assertIn("poll_errors", names)
+        self.assertIn("broken_notice", names)  # three rounds with errors announce a broken channel
+        self.assertEqual((events[-1]["event"], events[-1]["reason"]), ("exited", "stopped"))
+        [info] = self.ok_call("notify_list")["daemons"]
+        self.assertEqual((info["state"], info["exited"]["reason"]), ("stopped", "stopped"))
+        self.assertIn("hint", info)  # its notification is still open
 
 
 if __name__ == "__main__":

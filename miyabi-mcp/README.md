@@ -61,8 +61,9 @@ self-ignored by git): job records and script snapshots (`submissions/<submit_id>
 `jobs/<job number>`), append-only events (`events/`), default PBS output (`logs/`), notifications, plans and
 the project `policy.json`. User-level files are in `/work/<group>/<user>/.miyabi-mcp/`: `config.json`
 (e.g. `mig_hardware`), the default `policy.json`, the shared `qstat` snapshot, the job index across projects,
-notifier heartbeats and the submit lock. On a workstation the daemon keeps its state in
-`~/.local/state/miyabi-mcp/notifyd/`.
+notifier heartbeats and the submit lock. The notification daemon keeps its state, log and inbox in
+`notifyd/` there when it runs on a login node, and in `${XDG_STATE_HOME:-~/.local/state}/miyabi-mcp/notifyd/`
+on a workstation.
 
 ## Policy
 
@@ -74,6 +75,8 @@ types stop all writes). Install one with `bin/miyabi-mcp --project-dir <dir> ini
   "queues": ["debug-mig"],
   "per_job": {"max_mig_instances": 1, "max_walltime": "00:10:00"},
   "budget_windows": [{"window": "24h", "max_requested_mig_instance_hours": 1.0, "max_jobs": 6}],
+  "budget": {"unit": "node_hours", "limit": 200, "warn_at": 0.8,
+             "factors": {"node_hours": 1, "mig_instance_hours": 0.25}, "source": "docs/constraints.md:34"},
   "max_active_jobs": 2,
   "require_plan": true
 }
@@ -82,10 +85,23 @@ types stop all writes). Install one with `bin/miyabi-mcp --project-dir <dir> ini
 Keys: `groups`, `queues`, `per_job` (`max_nodes`, `max_mig_instances`, `max_walltime`, `max_node_hours`,
 `max_mig_instance_hours`), `max_active_jobs`, `label_limits` (`{"agent": {"max_active_jobs": 6}}`),
 `budget_windows` (`window`, `max_jobs`, `max_requested_node_hours`, `max_requested_mig_instance_hours`),
-`reserve_accept_slots` (default 4), `require_plan` (default true), `auto_commit_below_unit_hours`,
-`maintenance` (`refuse_if_crossing` or `warn`), `cancel_scope` (`project` or `any`). The user-level file may
+`budget` (`unit`, `limit`, `warn_at` default 0.8, `factors`, `source`), `reserve_accept_slots` (default 4),
+`require_plan` (default true), `auto_commit_below_unit_hours`, `maintenance` (`refuse_if_crossing` or
+`warn`), `cancel_scope` (`project` or `any`). The user-level file may
 also set `user: {max_active_jobs, budget_windows}` across all projects. The server enforces the policy; an
 agent with shell access to the project could still edit the file, so do not ask agents to change it.
+
+`budget` caps the project's total use in one unit. The projection is the measured usage of ended jobs, plus
+the full request (units × walltime) of every job without a measurement yet (queued, running, unknown, an
+uncertain submission, or ended without a recorded walltime), plus the job being submitted, each multiplied
+by the factor of its ledger unit (`node_hours`, `mig_instance_hours`). A submission qsub rejected counts
+nothing; a job that ended without starting counts 0. When the projection exceeds `limit` the dry run fails,
+and the commit fails too: it is checked again under the user-level submit lock, so concurrent submissions
+cannot cross the limit together. From `warn_at` × `limit` the check warns, which is the moment to report the
+budget to the user; raising `limit` is their decision. A ledger unit without a factor fails the check.
+`ledger_query(format="summary")` shows `budget` (used, reserved, total, fraction, jobs missing a
+measurement); filtered by `labels` it gives one stage's use. The site's TOKEN stays separate
+(`token_reported`). `budget_windows` measures something else: requested amounts within a time window, per unit.
 
 ## Tools
 
@@ -93,23 +109,52 @@ agent with shell access to the project could still edit the file, so do not ask 
 | --- | --- |
 | `pbs_context` | plane, host, project and state directory, PBS projects, scheduled stop, effective policy |
 | `pbs_queues` | queue shapes and status (REMAIN_ELAPSE), project limits, occupancy, token budget |
-| `job_list`, `job_get` | jobs from one shared `qstat -ll` snapshot; details from `qstat [-H] -f`; output tails |
-| `job_submit` | dry run → checked plan + `plan_digest`; same arguments + `dry_run=false` + digest → qsub; `notify` adds the job to a notification group |
+| `job_list`, `job_get` | jobs from one shared `qstat -ll` snapshot (`fields` picks top-level fields); details from `qstat [-H] -f`; output tails |
+| `job_submit` | dry run → checked plan + `plan_digest` (covering `notify`); same arguments + `dry_run=false` + digest → qsub; `notify` adds the job to a notification group |
 | `interactive_plan` | checked interactive allocation plan → `launch_command` and pi-env-mcp `terminal_open` arguments; submission happens when that command runs in a PTY |
 | `allocation_check` | verify the calling shell's compute host, target architecture, nodefile and live PBS allocation; fails outside a confirmed running allocation |
 | `job_cancel` | dry run → targets + digest; commit with a reason → qdel |
-| `job_wait` | bounded wait (≤ 45 s) for short jobs |
-| `notify_create`, `notify_update`, `notify_list`, `notify_cancel`, `notify_ack` | notifications for job groups, a queue reopening, or a timeout |
-| `ledger_query` | records, summary, events, or smooth-research observations; `export_command` prints them as JSONL |
+| `job_wait` | bounded wait (≤ 45 s) for short jobs; lists the notifications the jobs belong to |
+| `notify_create`, `notify_update`, `notify_list`, `notify_cancel`, `notify_ack` | notifications for job groups, a queue reopening, or a timeout; `notify_cancel` also dismisses a delivered, unacknowledged one |
+| `ledger_query` | records, summary (with `budget` when the policy sets one), events, or smooth-research observations; `export_command` prints them as JSONL |
 | `job_annotate` | labels, notes, application-level verdicts; `adopt` jobs submitted elsewhere |
+
+## Batch job scripts
+
+`job_submit` snapshots the script and runs qsub in `workdir` (default: the project directory). PBS starts a
+batch job in `$HOME`: `workdir` only sets `$PBS_O_WORKDIR`, so the script changes directory itself, after its
+`#PBS` lines (PBS stops reading directives at the first command):
+
+```bash
+#!/bin/bash
+#PBS -j oe
+cd -- "${PBS_O_WORKDIR:?}" || exit 1
+```
+
+Among the dry-run checks:
+
+- `script.cwd` warns when the script never runs `cd` or `pushd`.
+- `script.placeholders` fails on a `<name>` without spaces anywhere in the script, comments included (a
+  `#PBS` line is a comment to the shell), and gives line numbers. Redirections such as `<in.txt >out.txt` do
+  not match. Fill the placeholder in, reword the comment, or pass `allow_placeholders=true` (it then warns).
+- `queue.shape` checks `select`: it counts nodes on G and C queues and MIG instances on MIG queues, which
+  accept 1, 2 or 4 instances. `select.resources` fails on `vnode`, which qsub rejects, and warns on chunk
+  resources other than `mpiprocs`, `ompthreads` and `mem`.
+
+**MIG slices.** PBS assigns the slice; a job cannot choose it. The site lists MIG#0–#2 with 32 SMs and MIG#3
+with 26 SMs, 24 GB each, and jobs have run on both 2g.24gb and 1g.24gb. Slices can differ in compute and in
+BF16 results, so comparisons that must match bit for bit belong in one job; when the slice matters, record it
+inside the job (`nvidia-smi -L`). MIG plans carry this note as `plan.mig_slice`. Billing does not depend on
+the slice: batch MIG costs 0.25 token per instance-hour, and interactive MIG costs none. The ledger counts
+MIG use in `mig_instance_hours` labelled `GH200 MIG` (`mig_hardware` in the user-level `config.json`; the label
+is taken when a job is seen to end, and a running server reads the file only at start).
 
 ## Interactive compute allocations
 
-Use an interactive allocation for short iterative tests, builds and debugging. The workflow follows
-[miyabi-pbs-cmd's interactive guidance](../miyabi-pbs-cmd/references/qsub.md#interactive-work).
-`miyabi-mcp` checks resources and policy and keeps the job ledger; pi-env-mcp's persistent terminal carries
-the shell. Both servers must be configured, and the Miyabi installation of `bin/miyabi-mcp` and its Python
-environment must be usable from the selected compute system. G is aarch64; C needs its own x86_64 venv.
+Use an interactive allocation for short iterative tests, builds and debugging. `miyabi-mcp` checks resources
+and policy and keeps the job ledger; pi-env-mcp's persistent terminal carries the shell. Both servers must be
+configured, and the Miyabi installation of `bin/miyabi-mcp` and its Python environment must be usable from the
+selected compute system. G is aarch64; C needs its own x86_64 venv.
 
 1. Call `pbs_context`, then `pbs_queues` to inspect current queues, accounting groups, limits and remaining
    walltime before maintenance. Select a top-level `interact-g`, `interact-c` or `interact-mig` queue;
@@ -199,19 +244,111 @@ A notification tells an agent that jobs ended, whether it is busy or idle. One n
 ```
 
 Jobs submitted with the same `name` join the group; it is sealed when `expected` jobs have joined (or with
-`notify_update(seal=true)`), and fires once when all of them have ended. With `early_failure` (default on)
-a failing member is reported at once. The result carries `notify.daemon`:
+`notify_update(seal=true)`), and fires once when all of them have ended. The dry-run plan and its digest
+include the normalized `notify`. With `early_failure` (default on) a failing member is reported at once, and
+a member whose state turns unknown (PBS has lost track of it) is reported once; the group keeps waiting
+in both cases, and these interim messages need no acknowledgment. If the job is submitted but joining the
+notification fails, the result has `notify_error` and a `warning`: nothing will report that job.
 
-- Claude Code: run `listen_command` with the Bash tool's `run_in_background: true`. It starts the daemon on
-  your machine if needed and exits when the notification arrives; the exit notice is the message.
-- Other agents: run `start_command`; choose `deliver` = `herdr` (`agent`), `tmux` (`target`), `codex_queue`
-  (`thread`, `remote`), `command` (a name in the machine's config) or `file` (`path`).
+After every submission or `notify_create` that registers or joins a notification, run the command named in
+the result's `next`, even when a daemon seems to be running: it is idempotent and checks the daemon on your
+own machine.
 
-The daemon polls the login node every 5 minutes (`notify poll` over ssh, or directly on a login node),
-delivers locally, reports back, and exits after two polls with nothing left. If polling keeps failing (for
-example the ssh master closed) it sends a "notification channel broken" message to every known target.
-`notify_list` shows whether a daemon has polled recently. Manage it with
+- With the default `deliver` = `listener`, run `listen_command` (Claude Code: the Bash tool with
+  `run_in_background: true`). It starts the daemon if needed and exits when the message arrives; the exit
+  notice is the message. The daemon delivers by writing to the machine's inbox, so a message nobody listens
+  for is never seen: `start_command` alone does not show it. This holds for any agent, not only Claude Code.
+- An agent that cannot use a background command chooses a `deliver` that reaches it and runs `start_command`:
+  `herdr` (`agent`), `tmux` (`target`), `codex_queue` (`thread`, `remote`), `command` (a name in the machine's
+  config) or `file` (`path`). herdr, tmux and codex_queue are not yet verified live.
+
+One notification has one receiver: the agent that submitted the jobs and will act on the result. A
+coordinator follows the jobs with `notify_list` and `job_get` rather than listening. When two agents must both
+wake, create two notifications for the group (different `name`, each with its own `deliver`): the listener
+inbox is first come, first served, not a broadcast.
+
+`notify listen` exits 0 after printing the message, 75 when the daemon cannot be kept running, and 3 when the
+notification is no longer open for that notifier. With 3 the text says why: it was cancelled; it was
+delivered and taken from this machine's inbox at a given time (delivered means written to the inbox, not
+read); or it belongs to another notifier (`notify_list` shows which).
+
+The daemon polls the login node every `notify_poll_seconds` (user-level `config.json`, default 60; the server
+writes it into the returned commands), delivers locally and reports back. With nothing left it polls twice
+more, reports its exit and exits; a running daemon keeps the interval it started with. `notify_create` and
+`notify_list` show the daemon's `state`: `running`, `idle_exited` (normal when nothing is open), `stopped`,
+`stale` (no poll for two intervals plus a minute; it may have been killed) or `never`. A `hint` to run the
+command appears only when the notifier has open notifications and its daemon is not running. `notify_list`
+also returns a `summary`: open notifications, delivered ones not yet acknowledged, and each daemon's state.
+When polling fails, or a project cannot be read, three rounds in a row, the daemon sends a "notification
+channel broken" message to every known target (for example after the ssh master closed). It logs starts,
+exits, errors and deliveries to `<notifier>.log` in its state directory. Manage it with
 `bin/miyabi-mcp notifyd ensure|status|stop --notifier <name> [--remote <alias> --remote-launcher <path>]`.
+
+When notified, read the jobs with `job_get`, then call `notify_ack` with the token from the final message.
+`job_wait` lists the notifications of the jobs it waited for and how to close them. A delivered notification
+nobody acknowledged (for example a listener message no one read) can be closed with `notify_cancel`: it
+becomes `dismissed`, needs no token and is not an acknowledgment. Seven days after a notification was
+acknowledged, cancelled or dismissed, the daemon removes its inbox.
+
+## Export format
+
+`ledger_query(format="smooth-research")` returns an `observations` array: one Observation per exported ledger
+event (submitted, queued, held, running, ended, unknown), in append order, with `next_cursor`. The CLI prints
+the same observations as JSON Lines, one canonical object per line (sorted keys, no spaces, UTF-8), which
+is what `export_command` runs:
+
+```bash
+bin/miyabi-mcp --project-dir <dir> ledger --format smooth-research --jsonl > observations.jsonl
+```
+
+`--cursor <c>` resumes after a cursor (`""` starts at the beginning); only then is
+`{"next_cursor": …}` written, to stderr, after stdout has been flushed. Without `--cursor` stderr is empty, so
+`> file 2>&1` also yields one object per line. Pretty-printed, an ended MIG job looks like this:
+
+```json
+{
+  "attempt_id": "ATT-0001-1",
+  "execution_ref": {
+    "executor_namespace": "miyabi-pbs",
+    "kind": "hpc_job",
+    "locator": "/work/<group>/<user>/<project>/.miyabi-mcp/jobs/3790001/record.json",
+    "opaque_id": "3790001.opbs"
+  },
+  "execution_state": "ended",
+  "observed_at": "2026-11-03T14:05:10+09:00",
+  "occurred_at": "2026-11-03T14:04:31+09:00",
+  "outcome": "success",
+  "raw_state": "F Exit_status=0",
+  "record_id": "miyabi-pbs:3790001.opbs:3",
+  "source": "miyabi-mcp",
+  "source_ref": "qstat -H -f 3790001.opbs @miyabi-g2",
+  "source_sequence": 3,
+  "usage": {
+    "accounting_ref": "miyabi-pbs:3790001.opbs",
+    "basis": "measured",
+    "hardware": "GH200 MIG",
+    "quantity": 0.171389,
+    "resource_type": "gpu_mig_instance",
+    "source_ref": "resources_used.walltime=00:10:17 x nvnodes-mig=1",
+    "unit": "mig_instance_hours"
+  }
+}
+```
+
+- `usage` appears only on an ended job with a measured walltime. `quantity` is walltime × nodes in
+  `node_hours` (G and C) or walltime × instances in `mig_instance_hours` (MIG). The native record
+  (`format="records"`) keeps the same `usage` without `accounting_ref`, which the export adds as
+  `miyabi-pbs:<job_id>`.
+- No `usage`: events before the end, a job that never started (`raw_state` `FINISH no-start`), or one whose
+  PBS history expired before it was seen to end. Nothing is written as 0 in its place. A job that did run
+  can still measure 0 (`resources_used.walltime=00:00:00`, for example a script that exits at once).
+- `attempt_id` is present only for jobs submitted with a `client_ref`; `occurred_at` is PBS's own time
+  when known.
+- The site TOKEN is not mixed into usage: `include_token=true` adds `token_usages` with
+  `unit` `miyabi_token`, `basis` `reported` and `accounting_ref` `miyabi-pbs:<job_id>:token`.
+- A correction (`reconciled`) would carry `correction_of` and `note`; nothing generates one yet.
+- The same event always exports to the same bytes; fields added to the native ledger (such as where the
+  job ran, `state.pbs`) are not exported.
 
 ## Tests
 
@@ -226,10 +363,11 @@ The fake PBS replays anonymized output captured on miyabi-g1 (2026-10-30).
 Verified on Miyabi-G (2026-10-30): read-only queries against live PBS; the MCP server over `ssh -T`;
 submission with a project policy (debug-mig); cancelling held and running jobs; Exit_status of qdel on a
 running job (271) and of a walltime kill (−29); a background-command notification over ssh from a
-workstation; the MIG profile of debug-mig (`GH200 MIG 2g.24gb`); the notification daemon on a workstation
-over real ssh; and, in smooth-research's end-to-end test, a group of three jobs notified once through the
-listener, acknowledged and exported into `rl run record`. herdr, tmux and codex_queue delivery and Miyabi-C
-have not been run live.
+workstation; a debug-mig job (its slice was 2g.24gb; PBS assigns slices, see Batch job scripts); the
+notification daemon on a workstation over real ssh; and, in smooth-research's end-to-end test, a group of
+three jobs notified once through the listener, acknowledged and exported into `rl run record`. herdr, tmux
+and codex_queue delivery and Miyabi-C have not been run live. The 2026-11-05 changes (daemon states and exit
+reports, the 60 s interval, budget, MIG shapes, export output) are covered by the fake-PBS tests only.
 
 Interactive verification (2026-10-31 UTC / 2026-11-01 JST), through pi-env-mcp on `miyabi-g`: a one-node
 `interact-g` allocation on `mg0004` (job `3752062.opbs`) passed both allocation guards, retained shell

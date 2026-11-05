@@ -62,6 +62,12 @@ def exit_status(fields: dict[str, str]) -> int | None:
     return int(value) if re.fullmatch(r"-?\d+", value) else None
 
 
+def placement(fields: dict[str, str]) -> dict[str, str] | None:
+    """exec_host and exec_vnode as PBS printed them (where the job ran; kept after PBS history expires)."""
+    found = {key: fields[key].strip() for key in ("exec_host", "exec_vnode") if (fields.get(key) or "").strip()}
+    return found or None
+
+
 def from_detail(fields: dict[str, str], *, history: bool, cancel_requested: bool,
                 mig_hardware: str | None = None) -> dict[str, Any]:
     """One `qstat [-H] -f` record -> an observation (without event bookkeeping)."""
@@ -83,7 +89,8 @@ def from_detail(fields: dict[str, str], *, history: bool, cancel_requested: bool
                 outcome = "cancelled" if cancel_requested else "failed"
         return {"kind": "ended", "execution_state": "ended", "outcome": outcome, "raw_state": raw,
                 "pbs_time": pbs_time(fields.get("obittime")) or pbs_time(fields.get("mtime")),
-                "exit_status": status, "usage": usage(fields, mig_hardware), "token": token(fields)}
+                "exit_status": status, "usage": usage(fields, mig_hardware), "token": token(fields),
+                "pbs": placement(fields)}
     if job_state == "H":
         return {"kind": "held", "execution_state": "queued", "outcome": "unknown", "raw_state": "H",
                 "pbs_time": None}
@@ -92,7 +99,7 @@ def from_detail(fields: dict[str, str], *, history: bool, cancel_requested: bool
                 "pbs_time": pbs_time(fields.get("qtime"))}
     if job_state in {"R", "E", "B", "S", "U"}:
         return {"kind": "running", "execution_state": "running", "outcome": "unknown", "raw_state": job_state,
-                "pbs_time": pbs_time(fields.get("stime"))}
+                "pbs_time": pbs_time(fields.get("stime")), "pbs": placement(fields)}
     return {"kind": "unknown", "execution_state": "unknown", "outcome": "unknown",
             "raw_state": f"job_state={job_state or '?'}", "pbs_time": None}
 

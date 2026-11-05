@@ -285,7 +285,7 @@ Run one `loop` per root as a background job of the session. It restarts itself
 with the new code when the package changes: a loop that kept the rules it
 started with once requested 4 h jobs past a 3 h cap and ran 7 jobs against a
 share of 6. Wait with a watcher that wakes the session when `status` changes
-(or `miyabi-pbs-goal-wakeup` for one long job), not with a polling loop in the
+(or a miyabi-mcp notification for one long job), not with a polling loop in the
 conversation.
 
 Record decisions, not facts: one short entry per debatable choice (question,

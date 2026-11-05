@@ -127,7 +127,7 @@ class Store:
                 "execution_state": observation["execution_state"], "outcome": observation["outcome"],
                 "raw_state": observation["raw_state"], "locator": self.locator(job_id),
             }
-            for key in ("pbs_time", "exit_status", "usage", "token"):
+            for key in ("pbs_time", "exit_status", "usage", "token", "pbs"):
                 if observation.get(key) is not None:
                     event[key] = observation[key]
             if record.get("client_ref"):
@@ -138,6 +138,10 @@ class Store:
             self._append_event(event)
             record["seq"] = seq
             record["state"] = {key: event.get(key) for key in STATE_KEYS}
+            # Where the job ran, raw: a later observation without these fields keeps the earlier values.
+            placement = {**(last.get("pbs") or {}), **(event.get("pbs") or {})}
+            if placement:
+                record["state"]["pbs"] = placement
             if event.get("usage"):
                 record["usage"] = event["usage"]
             if event.get("token") is not None:

@@ -1,12 +1,15 @@
 # Python Environments
 
-Follow the [execution boundaries](../../miyabi-pbs-cmd/SKILL.md#execution-boundaries)
-and [context guard](../../miyabi-pbs-cmd/references/context.md) before running
-project Python. Shared storage does not make a virtualenv portable between G
-(`aarch64`) and C (`x86_64`). An architecture error calls for changing execution
-location, not replacing a working environment. Use the project's environment
-tool and version pins; maintain separate environments only when both targets
-are needed. Host Python 3.9 cannot validate syntax introduced by newer Python.
+Run project Python (tests, imports, validators, workloads) only in a compute
+allocation of the target system; on a login node, only set up the environment
+as below. Job scripts check the allocation with the templates' context guard;
+an interactive allocation checks it with miyabi-mcp's `allocation_check_command`
+(see [interactive compute allocations](../../miyabi-mcp/README.md#interactive-compute-allocations)).
+Shared storage does not make a virtualenv portable between G (`aarch64`) and C
+(`x86_64`). An architecture error calls for changing execution location, not
+replacing a working environment. Use the project's environment tool and version
+pins; maintain separate environments only when both targets are needed. Host
+Python 3.9 cannot validate syntax introduced by newer Python.
 
 ## Preserve Interpreter Identity
 
@@ -32,9 +35,9 @@ explicitly selects it. See [Python venv](https://docs.python.org/3/library/venv.
 Set up the environment on the login node of the system the jobs run on
 (`miyabi-g*` for G, `miyabi-c*` for C). When a dependency has no wheel for the
 target and compiles from source, run that install in an interactive compute
-allocation of the same system instead (`qsub -I`, see the
-[interactive work](../../miyabi-pbs-cmd/references/qsub.md#interactive-work)
-notes). Choose the needed operation for the project's dependency format; these
+allocation of the same system instead (miyabi-mcp `interactive_plan`, see
+[interactive compute allocations](../../miyabi-mcp/README.md#interactive-compute-allocations)).
+Choose the needed operation for the project's dependency format; these
 are alternatives, not a sequence:
 
 ```bash

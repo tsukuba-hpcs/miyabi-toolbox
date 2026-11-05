@@ -23,7 +23,14 @@ from .pbs import Pbs
 from .util import (MiyabiError, digest_bytes, digest_json, hms_to_seconds, now_iso, ok, pbs_time, read_json,
                    seconds_to_hms, within, write_json)
 
-PLACEHOLDER = re.compile(r"<[A-Za-z][A-Za-z0-9_:./ -]*>")
+# No spaces inside: `python x.py <config.yaml >train.log` and `cat <<EOF >notes.txt` are redirections.
+PLACEHOLDER = re.compile(r"<[A-Za-z][A-Za-z0-9_:./-]*>")
+CHANGES_DIR = re.compile(r"(?:^|[\s;&|(){}])(?:cd|pushd)(?=\s|;|$)")
+CHUNK_RESOURCE = re.compile(r"([A-Za-z_][A-Za-z0-9_.-]*)=[^:=+]+")
+# Chunk resources the site's qsub manual lists for select; others are not confirmed (vnode is rejected).
+SELECT_RESOURCES = {"mpiprocs", "ompthreads", "mem"}
+MIG_SLICE_NOTE = ("PBS assigns the MIG slice and it cannot be chosen. Slices can differ in compute (SM count) and in "
+                  "BF16 results, so comparisons that must match bit for bit belong in the same job.")
 JOB_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_.+-]{0,229}")
 ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 JOB_ID_LINE = re.compile(r"\d+(?:\[\])?\.[A-Za-z0-9_.-]+")
@@ -32,7 +39,7 @@ PLAN_TTL_S = 600
 MAX_SCRIPT_BYTES = 1 << 20
 RESERVED_ENV = {"MIYABI_SUBMIT_ID", "MIYABI_CLIENT_REF", "MIYABI_PROJECT_DIR", "MIYABI_JOB_RECORD"}
 STABLE = ("project_dir", "script_digest", "script_source", "queue", "group", "select", "walltime", "name", "workdir",
-          "output", "join", "env", "depend", "array", "labels", "client_ref", "request_key", "interactive")
+          "output", "join", "env", "depend", "array", "labels", "client_ref", "request_key", "interactive", "notify")
 
 
 class Checks(list):
@@ -50,6 +57,48 @@ def select_units(select: str) -> int:
         match = re.match(r"\s*(\d+)", chunk)
         total += int(match.group(1)) if match else 1
     return total
+
+
+def check_select(select: str, checks: Checks) -> None:
+    """The chunk resources of `select`: malformed chunks and vnode fail, names outside the manual's list warn."""
+    malformed, names = [], []
+    for chunk in select.split("+"):
+        parts = chunk.strip().split(":")
+        if parts and parts[0].isdigit():
+            parts = parts[1:]
+        if not chunk.strip() or chunk.strip().startswith(":") or (not parts and not chunk.strip().isdigit()):
+            malformed.append(chunk)
+            continue
+        for part in parts:
+            match = CHUNK_RESOURCE.fullmatch(part)
+            if match:
+                names.append(match.group(1))
+            else:
+                malformed.append(chunk)
+                break
+    if malformed:
+        checks.add("select.resources", "fail", "malformed select chunk(s) " + ", ".join(repr(c) for c in malformed)
+                   + ": use <count>:<resource>=<value>[:...] joined by +")
+    elif "vnode" in names:
+        checks.add("select.resources", "fail", "qsub rejects vnode (Unknown Resource): nodes and MIG slices are "
+                   "assigned by PBS and cannot be chosen")
+    else:
+        unconfirmed = sorted(set(names) - SELECT_RESOURCES)
+        if unconfirmed:
+            checks.add("select.resources", "warn", f"unconfirmed chunk resource(s) {', '.join(unconfirmed)}: the "
+                       f"site's qsub manual lists {', '.join(sorted(SELECT_RESOURCES))}; qsub may reject others")
+        else:
+            checks.add("select.resources", "pass", ", ".join(sorted(set(names))) or "counts only")
+
+
+def _placeholders(text: str) -> list[str]:
+    return [f"line {number}: {match}" for number, line in enumerate(text.splitlines(), 1)
+            for match in PLACEHOLDER.findall(line)]
+
+
+def _changes_directory(text: str) -> bool:
+    """Whether a line outside comments runs cd or pushd (no flow analysis: a hint, not a proof)."""
+    return any(CHANGES_DIR.search(line) for line in text.splitlines() if not line.lstrip().startswith("#"))
 
 
 def directives(text: str) -> list[str]:
@@ -94,6 +143,21 @@ def env_string(env: dict[str, str]) -> str:
     return ",".join(parts)
 
 
+def _accepts(queue: dict, units: int) -> bool:
+    """MIG queues take 1 node and a number of instances from AVAIL_MIG; the others a node range."""
+    if queue.get("mig_sizes"):
+        return units in queue["mig_sizes"]
+    return queue["min_nodes"] <= units <= queue["max_nodes"]
+
+
+def _shape(queue: dict) -> str:
+    sizes = queue.get("mig_sizes")
+    if sizes:
+        listed = ", ".join(str(n) for n in sizes[:-1]) + (" or " if len(sizes) > 1 else "") + str(sizes[-1])
+        return f"{listed} MIG instance" + ("s" if sizes != [1] else "")
+    return f"{queue['min_nodes']}–{queue['max_nodes']} nodes"
+
+
 def _route(queues: list[dict], queue: str, units: int, checks: Checks) -> dict | None:
     top = [q for q in queues if q["name"] == queue and not q.get("parent")]
     if not top:
@@ -105,16 +169,17 @@ def _route(queues: list[dict], queue: str, units: int, checks: Checks) -> dict |
         return None
     entry = top[0]
     if entry.get("routing"):
-        candidates = [q for q in queues if q.get("parent") == queue and q["min_nodes"] <= units <= q["max_nodes"]]
+        children = [q for q in queues if q.get("parent") == queue]
+        candidates = [q for q in children if _accepts(q, units)]
         if not candidates:
-            checks.add("queue.shape", "fail", f"no destination of {queue} accepts {units} units")
+            accepted = "; ".join(f"{q['name']} {_shape(q)}" for q in children)
+            checks.add("queue.shape", "fail", f"no destination of {queue} accepts {units} units ({accepted})")
             return None
         route = candidates[0]
     else:
         route = entry
-        if not route["min_nodes"] <= units <= route["max_nodes"]:
-            checks.add("queue.shape", "fail",
-                       f"{queue} accepts {route['min_nodes']}–{route['max_nodes']} units, not {units}")
+        if not _accepts(route, units):
+            checks.add("queue.shape", "fail", f"{queue} accepts {_shape(route)}, not {units}")
             return None
     checks.add("queue.shape", "pass", f"{units} units -> {route['name']}")
     if not route["enabled"]:
@@ -162,11 +227,19 @@ def build_plan(settings: Settings, store: Store, args: dict, policy: dict) -> tu
                                 timeout=10, check=False)
         checks.add("script.syntax", "pass" if syntax.returncode == 0 else "fail",
                    "bash -n" if syntax.returncode == 0 else syntax.stderr.strip()[-500:])
-    placeholders = sorted(set(PLACEHOLDER.findall(text)))
+        if _changes_directory(text):
+            checks.add("script.cwd", "pass", "the script changes directory")
+        else:
+            checks.add("script.cwd", "warn", "the script never runs cd or pushd: a batch job starts in $HOME, and "
+                       "workdir only sets $PBS_O_WORKDIR. If it uses relative paths, add after the #PBS lines: "
+                       'cd -- "${PBS_O_WORKDIR:?}" || exit 1')
+    placeholders = _placeholders(text)
+    shown = "; ".join(placeholders[:10]) + (f"; and {len(placeholders) - 10} more" if len(placeholders) > 10 else "")
     if placeholders and not args.get("allow_placeholders"):
-        checks.add("script.placeholders", "fail", "unfilled placeholders: " + ", ".join(placeholders[:10]))
+        checks.add("script.placeholders", "fail", f"unfilled placeholders: {shown}. Fill them in, reword a comment "
+                   "that only looks like one, or pass allow_placeholders=true when the text is meant literally")
     elif placeholders:
-        checks.add("script.placeholders", "warn", "allowed by caller: " + ", ".join(placeholders[:10]))
+        checks.add("script.placeholders", "warn", "allowed by caller: " + shown)
     found = directive_keys(directives(text))
     overridden = sorted(key for key in found if key in {"-q", "-N", "-o", "-j", "-J", "-l select", "-l walltime",
                                                          "-W group_list", "-W depend"})
@@ -184,6 +257,7 @@ def build_plan(settings: Settings, store: Store, args: dict, policy: dict) -> tu
     if interactive and queue not in {"interact-g", "interact-c", "interact-mig"}:
         checks.add("queue.interactive", "fail", "use a top-level interact-g, interact-c or interact-mig queue")
     select = args.get("select") or f"{int(args.get('nodes', 1))}:mpiprocs=1"
+    check_select(select, checks)
     units = select_units(select)
     queue_data = observe.queues(settings)
     route = _route(queue_data["queues"], queue, units, checks)
@@ -266,10 +340,16 @@ def build_plan(settings: Settings, store: Store, args: dict, policy: dict) -> tu
         raise MiyabiError("invalid_arguments", "labels must map names to string values")
     if args.get("depend"):
         checks.add("depend", "warn", "afterok chains break when a parent fails; prefer a notification group")
+    notify = None
     if args.get("notify") is not None:
-        from .notify import check_spec
+        from .notify import check_spec, normalize_spec
 
-        checks.add("notify", *check_spec(store, args["notify"]))
+        try:
+            notify = normalize_spec(settings, args["notify"])
+        except MiyabiError as exc:
+            checks.add("notify", "fail", exc.message)
+        else:
+            checks.add("notify", *check_spec(store, notify))
     writable = sorted(set(_code_paths_writable([workdir] + ([Path(script_source).parent] if script_source else []))))
     recorded = bool(args.get("client_ref") or (args.get("labels") or {}).get("code_commit"))
     if writable and recorded:
@@ -290,8 +370,10 @@ def build_plan(settings: Settings, store: Store, args: dict, policy: dict) -> tu
         "output": output, "join": args.get("join") or "oe", "env": dict(sorted(env.items())),
         "depend": args.get("depend"), "array": args.get("array"), "labels": dict(sorted(labels.items())),
         "client_ref": args.get("client_ref"), "request_key": args.get("request_key"),
-        "expected_seconds": args.get("expected_seconds"), "note": args.get("note"),
+        "expected_seconds": args.get("expected_seconds"), "note": args.get("note"), "notify": notify,
     }
+    if route and route.get("mig"):
+        plan["mig_slice"] = MIG_SLICE_NOTE
     plan["plan_digest"] = digest_json({key: plan[key] for key in STABLE})
     return plan, checks, extra
 
@@ -330,6 +412,16 @@ def volatile_checks(settings: Settings, store: Store, plan: dict, policy: dict) 
     checks.extend(policies.window_checks(policy.get("budget_windows", []),
                                          policies.project_submissions(store.records()),
                                          plan["unit"], plan["units"] * plan["walltime_s"], "project"))
+    if policy.get("budget"):
+        records = list(store.records())
+        try:
+            # Up-to-date states replace reservations by measurements; stale ones only reserve more.
+            observe.refresh(store, [r for r in records if r.get("job_id")], snap)
+            records = list(store.records())
+        except MiyabiError:
+            pass
+        checks.append(policies.budget_check(policy["budget"], records, plan["unit"],
+                                            plan["units"] * plan["walltime_s"]))
     user = policy.get("user") or {}
     if "max_active_jobs" in user:
         count = len(snap["jobs"])
@@ -528,13 +620,16 @@ def submit(settings: Settings, args: dict, *, interactive_qsub=None) -> dict:
 
     response = ok(job_id=job_id, submit_id=submit_id, record=store.locator(job_id), output=output,
                   events=events, checks=checks + live, export_command=export_command(settings, store.project_dir))
-    if args.get("notify"):
+    if plan.get("notify"):
         from .notify import join
 
         try:
-            response["notify"] = join(settings, store, args["notify"], job_id)
+            response["notify"] = join(settings, store, plan["notify"], job_id)
         except MiyabiError as exc:  # the job exists: report the notification problem, do not hide the job
             response["notify_error"] = exc.to_dict()
+            response["warning"] = (f"job {job_id} was submitted WITHOUT a notification: {exc.message}. Nothing will "
+                                   f"tell you when it ends: create one with notify_create(job_ids=[\"{job_id}\"], ...) "
+                                   "and run its command, or follow the job with job_wait/job_get")
     return response
 
 

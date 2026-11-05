@@ -123,7 +123,7 @@ proxy did not reproduce at 3–4B.
   written matters little.
 - **Wait on changes, not timers**: one resident watcher that wakes the session
   when the controller's `status` changes (in Claude Code, a background command
-  that exits on a change); `miyabi-pbs-goal-wakeup` for one long job; long
+  that exits on a change); a miyabi-mcp notification for one long job; long
   timers only as a fallback. About 11% of one series of experiments' tokens
   went to wakeups where nothing had changed.
 - **Hand over a state card**, at most ~2 KB, plus the list of constraints in

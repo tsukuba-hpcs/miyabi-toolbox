@@ -2,7 +2,9 @@
 
 Every tool runs through `miyabi-mcp call <tool> '<json arguments>'` and prints one JSON document;
 exit 0 when ok, 1 on a reported failure, 2 on bad arguments. `notifyd` and `notify listen` run on the
-agent's machine, which need not be a Miyabi node.
+agent's machine, which need not be a Miyabi node. `notify listen` exits 0 after printing the message,
+3 when the notification is no longer open for that notifier (the printed text says why) and 75 when
+the notification daemon cannot be kept running.
 """
 
 from __future__ import annotations
@@ -39,16 +41,19 @@ def _daemon_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--notifier", help="daemon name (default: this machine's short hostname)")
     parser.add_argument("--remote", help="ssh alias of the Miyabi login node; omit when running on it")
     parser.add_argument("--remote-launcher", help="bin/miyabi-mcp on the login node")
-    parser.add_argument("--poll-seconds", type=int, default=300)
+    parser.add_argument("--poll-seconds", type=int, default=config.NOTIFY_POLL_SECONDS,
+                        help="poll interval; the server's commands pass its notify_poll_seconds")
     parser.add_argument("--idle-polls", type=int, default=2)
     parser.add_argument("--fail-notify-after", type=int, default=3)
+    parser.add_argument("--started-by", default="run", choices=["ensure", "listen", "run"], help=argparse.SUPPRESS)
 
 
 def _options(args: argparse.Namespace):
     from .notifyd import Options, short_host
 
     return Options(notifier=args.notifier or short_host(), remote=args.remote, remote_launcher=args.remote_launcher,
-                   poll_seconds=args.poll_seconds, idle_polls=args.idle_polls, fail_notify_after=args.fail_notify_after)
+                   poll_seconds=args.poll_seconds, idle_polls=args.idle_polls, fail_notify_after=args.fail_notify_after,
+                   started_by=args.started_by)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -87,13 +92,17 @@ def build_parser() -> argparse.ArgumentParser:
     job.add_argument("--tail", type=int, default=0)
     ledger = add("ledger", help="= call ledger_query")
     ledger.add_argument("--format", default="records", choices=["records", "summary", "events", "smooth-research"])
-    ledger.add_argument("--cursor")
+    ledger.add_argument("--cursor", help="resume after this cursor (\"\" = from the start); with --jsonl the next "
+                        "cursor then goes to stderr")
     ledger.add_argument("--jsonl", action="store_true", help="smooth-research: one canonical observation per line")
     notify = add("notify", help="notification plumbing: poll and report (login node), listen (agent's machine)")
     notify_sub = notify.add_subparsers(dest="action", required=True)
     poll = notify_sub.add_parser("poll", parents=[common], help="messages due for a notifier (used by notifyd)")
     poll.add_argument("--notifier", required=True)
     poll.add_argument("--caller")
+    poll.add_argument("--interval", type=int, help="the daemon's poll interval, recorded in its heartbeat")
+    poll.add_argument("--instance", help="the daemon instance (host:pid:start)")
+    poll.add_argument("--exiting", choices=["idle", "stopped", "error"], help="report this daemon's exit")
     report = notify_sub.add_parser("report", parents=[common], help="record a delivery attempt (used by notifyd)")
     report.add_argument("--msg", required=True)
     report.add_argument("--outcome", required=True, help="JSON outcome, e.g. {\"status\": \"delivered\"}")
@@ -142,7 +151,8 @@ def main(argv: list[str] | None = None) -> int:
             from . import notify
 
             if args.action == "poll":
-                return _emit(notify.poll(settings, args.notifier, args.caller), args.pretty)
+                return _emit(notify.poll(settings, args.notifier, args.caller, interval=args.interval,
+                                         instance=args.instance, exiting=args.exiting), args.pretty)
             return _emit(notify.report(settings, args.msg, json.loads(args.outcome)), args.pretty)
         if args.command == "init":
             return _emit(_init(settings, args.policy), args.pretty)
@@ -163,8 +173,11 @@ def main(argv: list[str] | None = None) -> int:
             result = tools.run("ledger_query", settings, query)
             if args.jsonl and result.get("ok") and args.format == "smooth-research":
                 for item in result["observations"]:
-                    print(canonical(item))
-                print(compact({"next_cursor": result.get("next_cursor")}), file=sys.stderr)
+                    sys.stdout.write(canonical(item) + "\n")
+                # Flush before stderr: with `> file 2>&1` the cursor must not land inside an observation's line.
+                sys.stdout.flush()
+                if args.cursor is not None:
+                    print(compact({"next_cursor": result.get("next_cursor")}), file=sys.stderr, flush=True)
                 return 0
             return _emit(result, args.pretty)
     except MiyabiError as exc:

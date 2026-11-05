@@ -14,6 +14,9 @@ from .util import MiyabiError, digest_json, hms_to_seconds, now_iso, ok, pbs_tim
 
 MAX_IDS = 40
 MAX_TAIL = 200
+# The top-level fields of a job_list row (the qstat -ll columns plus finished, project and ledger).
+LIST_FIELDS = ("job_id", "job_name", "status", "project", "queue", "start_date", "elapsed_seconds", "token",
+               "token_estimate", "nodes", "mig", "finished", "ledger")
 
 
 def _store(settings: Settings) -> Store | None:
@@ -102,6 +105,11 @@ def _ledger_view(record: dict | None) -> dict | None:
 
 
 def job_list(settings: Settings, args: dict) -> dict:
+    fields = args.get("fields")
+    unknown = [name for name in fields or [] if name not in LIST_FIELDS]
+    if unknown:
+        raise MiyabiError("invalid_arguments", f"unknown field(s) {unknown}: fields takes top-level names from "
+                          f"{list(LIST_FIELDS)} (no dotted paths; ledger holds the ledger view)")
     store = _store(settings)
     ledger_records = [r for r in store.records() if r.get("job_id")] if store else []
     snap = observe.snapshot(settings, max_age=settings.config["interactive_max_age_s"],
@@ -140,7 +148,6 @@ def job_list(settings: Settings, args: dict) -> dict:
     if args.get("summary"):
         result["status_counts"] = dict(sorted(Counter(job["status"] for job in jobs).items()))
     else:
-        fields = args.get("fields")
         result["jobs"] = [{k: job.get(k) for k in fields} for job in jobs] if fields else jobs
     return result
 
@@ -350,6 +357,56 @@ def _selected(record: dict, args: dict) -> bool:
     return True
 
 
+def _filtered(args: dict) -> bool:
+    return any(args.get(key) for key in ("labels", "client_ref", "job_ids", "state", "since", "until"))
+
+
+def _summary(records: list[dict], budget: dict | None, filtered: bool) -> dict:
+    """Counts and native-unit totals. `requested` counts jobs PBS accepted; rejected submissions and qsub
+    calls with an uncertain result are listed apart. TOKEN stays separate from the budget's unit: the
+    site's factor depends on the system and interactive queues are exempt."""
+    by_state, by_outcome, used = Counter(), Counter(), Counter()
+    seconds = {"requested": Counter(), "rejected": Counter(), "uncertain": Counter()}
+    counts = Counter()
+    token = 0.0
+    for record in records:
+        state = record.get("state") or {}
+        by_state[state.get("execution_state") or record.get("status")] += 1
+        if state.get("execution_state") == "ended":
+            by_outcome[state.get("outcome")] += 1
+        submit = record.get("submit") or {}
+        if record.get("job_id"):
+            bucket = "requested" if submit.get("requested_unit_hours") is not None else None
+        elif record.get("status") == "submit_failed":
+            bucket = "rejected"
+        elif record.get("status") in {"submitting", "submit_uncertain"}:
+            bucket = "uncertain"
+        else:
+            bucket = None
+        if bucket:
+            counts[bucket] += 1
+            if submit.get("unit"):
+                # Sum whole unit-seconds, convert once: three 8-minute jobs request 0.4, not 0.399999.
+                seconds[bucket][submit["unit"]] += int(submit.get("units") or 0) * int(submit.get("walltime_s") or 0)
+        usage = record.get("usage") or {}
+        if usage.get("unit"):
+            used[usage["unit"]] += usage["quantity"]
+        if record.get("token_reported") is not None:
+            token += float(record["token_reported"])
+
+    def hours(counter: Counter) -> dict:
+        return {unit: round(value / 3600, 6) for unit, value in counter.items()}
+
+    summary = {"by_state": dict(by_state), "by_outcome": dict(by_outcome), "requested": hours(seconds["requested"]),
+               "used": {unit: round(value, 6) for unit, value in used.items()},
+               "rejected": {"count": counts["rejected"], "requested": hours(seconds["rejected"])},
+               "uncertain": {"count": counts["uncertain"], "requested": hours(seconds["uncertain"])},
+               "token_reported": round(token, 6)}
+    if budget:
+        summary["budget"] = {**policies.budget_status(budget, records), "filtered": filtered}
+    return summary
+
+
 def ledger_query(settings: Settings, args: dict) -> dict:
     store = Store(settings)
     fmt = args.get("format", "records")
@@ -362,23 +419,14 @@ def ledger_query(settings: Settings, args: dict) -> dict:
     if fmt == "records":
         return ok(project=str(store.project_dir), count=len(records), records=records)
     if fmt == "summary":
-        totals: dict = {"by_state": Counter(), "by_outcome": Counter(), "requested": Counter(), "used": Counter()}
-        for record in records:
-            state = record.get("state") or {}
-            totals["by_state"][state.get("execution_state") or record.get("status")] += 1
-            if state.get("execution_state") == "ended":
-                totals["by_outcome"][state.get("outcome")] += 1
-            submit = record.get("submit") or {}
-            if submit.get("unit") and submit.get("requested_unit_hours") is not None:
-                # Sum whole unit-seconds, convert once: three 8-minute jobs request 0.4, not 0.399999.
-                totals["requested"][submit["unit"]] += int(submit.get("units") or 0) * int(submit.get("walltime_s") or 0)
-            usage = record.get("usage") or {}
-            if usage.get("unit"):
-                totals["used"][usage["unit"]] += usage["quantity"]
-        totals["requested"] = Counter({unit: seconds / 3600 for unit, seconds in totals["requested"].items()})
-        return ok(project=str(store.project_dir), count=len(records),
-                  summary={key: {k: round(v, 6) if isinstance(v, float) else v for k, v in counter.items()}
-                           for key, counter in totals.items()})
+        try:  # an invalid policy stops writes, not this read
+            budget, budget_error = policies.load(settings).get("budget"), None
+        except MiyabiError as exc:
+            budget, budget_error = None, exc.to_dict()
+        summary = _summary(records, budget, filtered=_filtered(args))
+        if budget_error:
+            summary["budget_error"] = budget_error
+        return ok(project=str(store.project_dir), count=len(records), summary=summary)
     if fmt not in {"events", "smooth-research"}:
         raise MiyabiError("invalid_arguments", "format must be records, summary, events or smooth-research")
     wanted = {r["job_id"] for r in records if r.get("job_id")}

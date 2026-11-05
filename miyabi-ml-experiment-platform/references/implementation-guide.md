@@ -82,9 +82,11 @@ every `<...>`:
 
 - `#PBS -W group_list=`: the literal project group (PBS does not expand
   variables in `#PBS` lines).
-- `MIYABI_PBS_CMD_ROOT`: the absolute directory of the `miyabi-pbs-cmd` skill,
-  whose `context.py --require-compute` refuses login nodes and foreign
-  allocations. Without that skill, use the inline check the template shows.
+- `MIYABI_PBS_CMD_ROOT`: the absolute `miyabi-pbs-cmd` directory of the
+  miyabi-toolbox checkout (not an agent's skills link: the skill is deprecated,
+  its guard is not), whose `context.py --require-compute` refuses login nodes
+  and foreign allocations. Without the checkout, use the inline check the
+  template shows.
 - `PYTHON_BIN` (the experiment's venv), `HF_HOME` (a shared directory on /work),
   `PILOT_MODULE`, and a `module load` line that matches your torch build.
 

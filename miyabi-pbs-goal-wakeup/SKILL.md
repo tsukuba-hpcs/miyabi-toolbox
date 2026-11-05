@@ -1,9 +1,20 @@
 ---
 name: miyabi-pbs-goal-wakeup
-description: Let an agent sleep through a long Miyabi PBS job and be woken when it ends. Resumes a paused Codex Goal, or wakes an idle Claude Code session through a background watcher. Invoke when estimated queue wait plus runtime exceeds 1 hour, or when the user requests pause-and-resume. Poll every 5 minutes by default.
+description: DEPRECATED (2026-11-05). Wait for Miyabi PBS jobs with miyabi-mcp instead: job_wait for jobs of a few minutes; for longer ones a notification (notify on job_submit, or notify_create), then run the command its result names. Kept only as a record of the earlier per-job poller; do not register new wake-ups with it.
 ---
 
 # Miyabi PBS Goal Wake-up
+
+> **Deprecated (2026-11-05).** [miyabi-mcp notifications](../miyabi-mcp/README.md#notifications)
+> replace this skill. One notification covers a group of jobs (all ended, any
+> ended, all started), a queue reopening or a timeout; a daemon on the agent's
+> machine delivers it, and the server reports whether that daemon runs. Submit with
+> `notify={"name": …, "expected": …, "message": …}` or call `notify_create`, then
+> run the command named in the result's `next`; use `job_wait` for jobs of a few
+> minutes. Resuming a paused Codex Goal has no replacement yet (the `codex_goal`
+> delivery is planned for miyabi-mcp v0.2). Pollers registered earlier run until
+> they fire; register no new ones. The rest of this file documents the old
+> mechanism.
 
 ## When to invoke
 

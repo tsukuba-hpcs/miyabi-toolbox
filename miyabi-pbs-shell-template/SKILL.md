@@ -15,12 +15,15 @@ resources, modules, paths and workload arguments.
 | [mpi-workers.pbs](assets/pbs/mpi-workers.pbs) | Miyabi-G Open MPI, one Python worker per rank |
 
 Read [template setup and validation](references/templates.md) before adapting an
-asset. The examples depend on the installed `miyabi-pbs-cmd` context helper;
-that reference explains the required paths, placeholders and checks.
+asset. The examples run the context guard `miyabi-pbs-cmd/scripts/context.py`
+from the miyabi-toolbox checkout (the miyabi-pbs-cmd skill is deprecated; its
+guard is not); that reference explains the required paths, placeholders and
+checks.
 
-Use [miyabi-pbs-cmd](../miyabi-pbs-cmd/SKILL.md) for resource queries, submission
-and monitoring. Follow its execution boundaries and
-[long-job wake-up rule](../miyabi-pbs-cmd/SKILL.md#long-jobs) when submitting.
+Query queues, submit, monitor and wait with [miyabi-mcp](../miyabi-mcp/README.md):
+`pbs_queues`, a `job_submit` dry run and then its commit, `job_get`, and `notify`
+for long jobs. Tests, imports and other workloads run only inside a compute
+allocation.
 
 ## Workload References
 

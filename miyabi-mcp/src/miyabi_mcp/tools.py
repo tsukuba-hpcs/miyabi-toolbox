@@ -69,13 +69,17 @@ TOOLS = [
          jobs.pbs_queues),
     Tool("job_list", "List jobs",
          "The user's unfinished jobs from one shared qstat snapshot (at most ~15 s old), merged with this project's "
-         "ledger; optional bounded history. Also brings the ledger up to date. FINISH never means success.",
+         "ledger; optional bounded history. Also brings the ledger up to date. FINISH never means success. Null is "
+         "normal for start_date, elapsed_seconds and token of a queued job, nodes of a MIG job, mig of a node job, "
+         "and ledger and project of a job outside this project's ledger.",
          schema({"status": STRS, "name_prefix": STR, "labels": LABELS, "project_only": {"type": "boolean"},
                  "history": {"type": "object", "properties": {"days": {"type": "integer", "minimum": 1, "maximum": 7},
                                                                "limit": {"type": "integer", "minimum": 1,
                                                                          "maximum": 500}},
                              "additionalProperties": False},
-                 "fields": STRS, "summary": {"type": "boolean"}, "refresh_ledger": {"type": "boolean"}}),
+                 "fields": {"type": "array", "items": {"enum": list(jobs.LIST_FIELDS)},
+                            "description": "Top-level fields to keep (no dotted paths; ledger holds the ledger view)."},
+                 "summary": {"type": "boolean"}, "refresh_ledger": {"type": "boolean"}}),
          jobs.job_list),
     Tool("job_get", "Job details",
          "Details of 1–40 jobs from qstat -f (active) or qstat -H -f (finished): times, resources, exit status, "
@@ -84,9 +88,10 @@ TOOLS = [
                  "tail_lines": {"type": "integer", "minimum": 0, "maximum": 200}}, ("job_ids",)),
          jobs.job_get),
     Tool("job_submit", "Submit a batch job",
-         "Two steps. dry_run=true (default) checks the script (bash -n, placeholders, #PBS overrides), queue shape "
-         "and walltime, the scheduled stop, group, limits and the project policy, and returns the plan with a "
-         "plan_digest. Call again with the same arguments, dry_run=false and that plan_digest to run qsub. "
+         "Two steps. dry_run=true (default) checks the script (bash -n, placeholders, #PBS overrides, cd), the "
+         "queue shape (MIG queues take 1, 2 or 4 instances per AVAIL_MIG), select resources, walltime, the scheduled "
+         "stop, group, limits, the project policy and budget, and returns the plan with a plan_digest that also "
+         "covers notify. Call again with the same arguments, dry_run=false and that plan_digest to run qsub. "
          "request_key makes retries safe; client_ref is exported as the attempt id. Jobs get MIYABI_SUBMIT_ID, "
          "MIYABI_CLIENT_REF, MIYABI_PROJECT_DIR and MIYABI_JOB_RECORD; output defaults to <project>/.miyabi-mcp/logs/. "
          "For an interactive compute shell use interactive_plan instead.",
@@ -96,7 +101,9 @@ TOOLS = [
                  "walltime": {**STR, "description": "HH:MM:SS; size it from measurements (×1.5), never the cap."},
                  "select": {**STR, "description": "PBS select, e.g. 1:mpiprocs=1 (MIG queues count instances)."},
                  "nodes": {"type": "integer", "minimum": 1}, "group": STR, "name": STR,
-                 "workdir": {**STR, "description": "qsub working directory; default the project directory."},
+                 "workdir": {**STR, "description": "Directory qsub runs in (default: the project directory); the job "
+                             "sees it as $PBS_O_WORKDIR but starts in $HOME, so the script must cd itself, e.g. "
+                             'cd -- "${PBS_O_WORKDIR:?}" || exit 1 after the #PBS lines.'},
                  "output": {**STR, "description": "Absolute PBS output path on /work."}, "join": STR,
                  "env": {"type": "object", "additionalProperties": {"type": "string"}},
                  "depend": STR, "array": STR, "labels": LABELS, "client_ref": STR, "request_key": STR,
@@ -104,7 +111,8 @@ TOOLS = [
                  "dry_run": {"type": "boolean", "default": True}, "plan_digest": STR,
                  "resubmit": {"type": "boolean"}, "allow_placeholders": {"type": "boolean"},
                  "notify": {"type": "object", "properties": NOTIFY_PROPERTIES, "additionalProperties": False,
-                            "description": "Add this job to a notification (created on first use of its name)."}},
+                            "description": "Add this job to a notification (created on first use of its name). "
+                                           "After the commit run the command its `next` names, every time."}},
                 ("queue", "walltime")),
          submissions.submit, read_only=False),
     Tool("interactive_plan", "Plan an interactive allocation",
@@ -141,15 +149,18 @@ TOOLS = [
                  "targets_digest": STR, "allow_external": {"type": "boolean"}}),
          jobs.job_cancel, read_only=False, destructive=True),
     Tool("job_wait", "Wait briefly",
-         "Block up to ~45 s for jobs of a few minutes (all_ended, any_ended or started). For anything longer "
-         "submit with notify instead of polling.",
+         "Block up to ~45 s for jobs of a few minutes (all_ended, any_ended or started; a job in state unknown "
+         "counts as neither). For anything longer submit with notify instead of polling. The result lists the "
+         "notifications these jobs belong to and how to close each.",
          schema({"job_ids": {**STRS, "minItems": 1}, "when": {"enum": ["all_ended", "any_ended", "started"]},
                  "timeout_s": {"type": "number", "minimum": 1}}, ("job_ids",)),
          notify.job_wait),
     Tool("notify_create", "Create a notification",
          "Notify you when jobs end or start, when a queue reopens, or after a timeout. job_ids seals the group at "
-         "once; a name with expected is filled by job_submit(notify=...). Delivery runs on your machine: run "
-         "daemon.listen_command (Claude Code, in the background) or daemon.start_command (others).",
+         "once; a name with expected is filled by job_submit(notify=...). Delivery runs on your machine: run the "
+         "command `next` names every time, even when a daemon seems to run. With deliver=listener (default) only "
+         "daemon.listen_command shows the message (Claude Code: in the background); other methods need "
+         "daemon.start_command. One receiver per notification.",
          schema({**NOTIFY_PROPERTIES, "job_ids": {**STRS, "description": "Jobs in this project's ledger."},
                  "queue": {"type": "object", "description": 'e.g. {"queue": "debug-g", "state": "started"}.',
                            "properties": {"queue": STR, "state": {"enum": ["started"]}}, "required": ["queue"],
@@ -161,16 +172,22 @@ TOOLS = [
          schema({"id": STR, "name": STR, "add_job_ids": STRS, "seal": {"type": "boolean"}, "message": STR}),
          notify.update, read_only=False),
     Tool("notify_list", "List notifications",
-         "This project's notifications: status, sealing, members, pending messages, and whether the delivering "
-         "daemon has polled recently (with the command that starts it).", schema({"status": STRS}), notify.list_),
-    Tool("notify_cancel", "Cancel a notification", "Cancel an open notification (a delivery cannot be retracted).",
+         "This project's notifications (status, sealing, members, pending messages, listen_command while open), a "
+         "summary (open, delivered but unacknowledged, daemon states) and each delivering daemon's state: running, "
+         "idle_exited, stopped, stale or never, with the command that starts it.", schema({"status": STRS}),
+         notify.list_),
+    Tool("notify_cancel", "Cancel or dismiss a notification",
+         "Cancel an open notification, or dismiss a delivered one nobody acknowledged (no token needed; recorded as "
+         "dismissed, not as an acknowledgment). A delivery cannot be retracted.",
          schema({"id": STR, "reason": STR}, ("id",)), notify.cancel, read_only=False),
     Tool("notify_ack", "Acknowledge a notification",
-         "Acknowledge a delivered notification with the ack_token from its message.",
+         "Acknowledge a delivered notification with the ack_token from its final message (early-failure and "
+         "state-unknown messages carry none: the group is still waiting).",
          schema({"id": STR, "ack_token": STR}, ("id", "ack_token")), notify.ack, read_only=False, idempotent=True),
     Tool("ledger_query", "Query the job ledger",
-         "This project's ledger: records, a summary (counts, requested and used node·h or MIG instance·h), raw "
-         "events, or smooth-research observations (format=smooth-research; byte-stable, resumable with cursor).",
+         "This project's ledger: records, a summary (counts; requested and used node·h or MIG instance·h of accepted "
+         "jobs; rejected and uncertain submissions; TOKEN; the policy budget as used + reserved), raw events, or "
+         "smooth-research observations (format=smooth-research; byte-stable, resumable with cursor).",
          schema({"format": {"enum": ["records", "summary", "events", "smooth-research"]}, "labels": LABELS,
                  "client_ref": STR, "job_ids": STRS, "state": STRS, "since": STR, "until": STR, "cursor": STR,
                  "limit": {"type": "integer", "minimum": 1}, "include_token": {"type": "boolean"},

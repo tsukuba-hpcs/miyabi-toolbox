@@ -1,9 +1,30 @@
 ---
 name: miyabi-pbs-cmd
-description: Operate Miyabi PBS safely. First establish whether the shell is a login/control node, a confirmed PBS compute allocation or unknown, and keep heavy CPU/memory work off login nodes. Query, submit and control jobs using the site's qstat, qsub, qdel and tracejob dialect. Use at the start of any Miyabi session, before running tests, builds, training or inference, and for job status/history, queue limits, interactive or batch submission and cancellation. Prefer bundled scripts for JSON job/history and host/allocation information.
+description: DEPRECATED (2026-11-05). Use the miyabi-mcp tools instead, the standard way to operate Miyabi PBS (pbs_context, pbs_queues, job_list, job_get, job_submit, interactive_plan, allocation_check, job_cancel, job_wait, notifications). Kept only as background on the site's qstat/qsub dialect and for scripts/context.py, the compute-node guard that the miyabi-pbs-shell-template examples run inside jobs. Do not use it to query, submit, cancel or wait on jobs.
 ---
 
 # Miyabi PBS Commands
+
+> **Deprecated (2026-11-05).** [miyabi-mcp](../miyabi-mcp/README.md) is the standard
+> way to operate Miyabi PBS: it checks each submission against the project's policy
+> and budget, keeps the job ledger and notifies the agent when groups of jobs end.
+> Use its tools; the rest of this file is kept as background on the site's dialect.
+> `scripts/context.py` stays in use: the
+> [shell templates](../miyabi-pbs-shell-template/SKILL.md) run it inside jobs.
+>
+> | Instead of | Use in miyabi-mcp |
+> | --- | --- |
+> | `context.py` to find the operating plane | `pbs_context`; inside an allocation, `allocation_check` |
+> | `qstat_json.py`, `qstat -f`, `qstat -H -f` | `job_list`, `job_get` |
+> | `qstat --rsc`, `qstat --limit`, `show_token` | `pbs_queues` |
+> | `qsub` | `job_submit`: dry run, then commit with its `plan_digest` |
+> | `qsub -I` | `interactive_plan` |
+> | `qdel` | `job_cancel`: dry run, then commit |
+> | waiting, [goal-wakeup](../miyabi-pbs-goal-wakeup/SKILL.md) | `job_wait` for jobs of a few minutes; otherwise `notify` on `job_submit`, or `notify_create` |
+>
+> An agent without these tools registers miyabi-mcp
+> ([setup](../miyabi-mcp/README.md#register-with-an-agent)) or runs its CLI,
+> `bin/miyabi-mcp call <tool> '<json>'`, instead of falling back to this skill.
 
 Use project instructions and current site output to select the target system,
 accounting group, resources and paths. Prefer the bundled scripts over parsing

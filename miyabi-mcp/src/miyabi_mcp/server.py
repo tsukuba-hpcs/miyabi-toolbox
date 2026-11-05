@@ -40,9 +40,13 @@ miyabi-mcp operates Miyabi PBS for this project: queries, submission, cancellati
   a start time never ran.
 - Do not poll in a loop. For jobs of a few minutes use job_wait. For longer ones submit with
   notify={"name": ..., "expected": <jobs in the group>, "message": <what to do next>}: one notification
-  covers a group (e.g. all seeds). Then run the returned command on your own machine: Claude Code runs
-  daemon.listen_command with run_in_background=true; other agents run daemon.start_command. Keep working
-  on things that do not depend on the jobs. When notified, read the jobs with job_get, then notify_ack.
+  covers a group (e.g. all seeds). After every registration or join, run the command the result's
+  `next` names on your own machine, even when the daemon seems to be running (it is idempotent). With
+  deliver=listener (the default) only daemon.listen_command shows the message (Claude Code: Bash with
+  run_in_background=true); daemon.start_command alone never does. Other delivery methods need
+  daemon.start_command. One receiver per notification: the agent that submitted listens; when two
+  agents must wake, create two notifications. Keep working on things that do not depend on the jobs.
+  When notified, read the jobs with job_get, then notify_ack with the token of the final message.
 - Cancel only jobs this project submitted (job_cancel dry run first).
 """
 

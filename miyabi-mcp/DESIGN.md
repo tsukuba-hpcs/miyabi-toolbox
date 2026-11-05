@@ -9,10 +9,10 @@
 3. **运行环境。** 服务运行在 `miyabi-mcp/.venv` 中（uv 管理，Python ≥ 3.11）。在 Miyabi 上以系统自带的 `/usr/bin/python3.11` 为基础建 venv，不下载解释器，也不往 `$HOME` 写。MCP 协议层用官方 Python SDK，核心逻辑只用标准库。每个工具都有对应的 CLI 子命令，输出同一份 JSON，所以只有 shell 的 agent（例如经 pi-env-mcp 的 `bash`）也能用。
 4. **v0.1 覆盖前五项需求**：查询（`pbs_context`、`pbs_queues`、`job_list`、`job_get`）；提交（`job_submit`，先 dry-run 出计划，再凭计划摘要提交）；取消（`job_cancel`）；记录与管理（作业台账、事件日志、查询与导出）；通知（`job_wait` 有界等待；作业组通知、agent 所在机器上的 daemon 投递、确认）。第六项（pilot 占位排队与任务打包）排在 v0.3。
 5. **通知（原称"唤醒"）。** agent 等作业时可能正在做别的事，所以这里是"通知"而不是"唤醒"。
-   - agent 提交作业后，在自己所在的机器上启动 notify daemon（已在运行就跳过）。daemon 每 5 分钟经 miyabi-mcp poll 一次；条件判定仍在登录节点完成（共享的 qstat 快照加台账），投递在本机进行：Claude Code 用后台 listener，另有 herdr、tmux、codex_queue、具名命令和文件。
+   - agent 每次登记或加入通知后，都在自己所在的机器上运行返回的命令（`ensure` 是幂等的，不以"已在运行"为由跳过，9.3）。daemon 按 `notify_poll_seconds`（默认 60 秒）经 miyabi-mcp poll；条件判定仍在登录节点完成（共享的 qstat 快照加台账），投递在本机进行：Claude Code 用后台 listener，另有 herdr、tmux、codex_queue、具名命令和文件。
    - 一个通知可以绑定一组作业（如多个 seed），全部结束后发一条汇总通知；可选在任一成员失败时提前通知。
    - 通知通道中断（ssh 断开等）本身也会通知 agent，不会静默。
-6. **台账。** 每个作业一份 JSON 记录，另有按月追加的事件日志。台账、脚本快照、PBS 日志等必须留在 Miyabi 上的产出，都放在项目目录下的 `.miyabi-mcp/` 中。项目目录默认是 `/work/<group>/<user>/<project>`，用户也可以另行指定。写入用原子 rename 和跨节点安全的锁文件。不用 SQLite，因为两台登录节点上可能同时有多个写者。事件可以 1:1 导出为 smooth-research 的 Observation/Usage。
+6. **台账。** 每个作业一份 JSON 记录，另有按月追加的事件日志。台账、脚本快照、PBS 日志等必须留在 Miyabi 上的产出，都放在项目目录下的 `.miyabi-mcp/` 中。项目目录默认是 `/work/<group>/<user>/<project>`，用户也可以另行指定。写入用原子 rename 和跨节点安全的锁文件。不用 SQLite，因为几台登录节点（g1、g2、g3）上可能同时有多个写者。事件可以 1:1 导出为 smooth-research 的 Observation/Usage。
 7. **护栏。** 提交和取消默认 dry-run；策略文件设上限（每作业节点数、walltime、node·h，每个标签的并发，保留的 accepted 槽位）；幂等键防止重复提交；结果不确定时先对账再决定是否重试；默认只取消本项目台账内的作业；FINISH 不等于成功。
 
 ## 1. 目标与范围
@@ -156,7 +156,7 @@
 ### 5.1 三种接入方式
 
 ```
- 工作站                                          Miyabi 登录节点（g1 或 g2）
+ 工作站                                          Miyabi 登录节点（g1、g2、g3 之一）
 ┌───────────────────────────────┐            ┌────────────────────────────────────────────┐
 │ Claude Code / Codex / pi      │            │                                            │
 │                               │  B: ssh -T │                                            │
@@ -164,7 +164,7 @@
 │                               │            │        │                                   │
 │  MCP miyabi-g (pi-env-mcp) ───┼─ C ───────▶│ pi-env daemon ──▶ bash: miyabi-mcp <cmd>   │
 │                               │            │        │                                   │
-│  notifyd: ssh … notify poll ──┼───────────▶│ miyabi-mcp notify poll（每 5 分钟）         │
+│  notifyd: ssh … notify poll ──┼───────────▶│ miyabi-mcp notify poll（默认每 60 秒）      │
 └───────────────────────────────┘ 同一个      │        ▼                                   │
                                  ControlMaster│ /work 上的共享状态：                        │
  登录节点上的 agent ── A: stdio ──────────────▶│ <project>/.miyabi-mcp（台账、通知、日志）   │
@@ -219,7 +219,7 @@ tool_timeout_sec = 120
 ### 5.4 连接与登录节点的注意事项
 
 - **BatchMode。** 主连接（ControlMaster）不在时服务起不来，用户要先 `ssh -fN miyabi-g`（与 pi-env-mcp 的 shareConnection 相同）。ControlPersist（这里是 8 h）是从最后一个会话断开时开始计时的。
-- **两台登录节点。** 同一主连接里的会话落在同一台，不同主连接可能落在另一台。台账、通知和轮询快照都在共享文件系统上；进程是否存活靠心跳文件判断，不靠 pid。
+- **多台登录节点。** 目前至少有 g1、g2、g3。同一主连接里的会话落在同一台，不同主连接可能落在另一台。台账、通知和轮询快照都在共享文件系统上；进程是否存活靠心跳文件判断，不靠 pid。
 - **PATH。** 服务端用绝对路径调用 PBS 命令（`/usr/local/bin/qstat`、`/opt/pbs/bin/qsub` 等，可配置），不依赖 ssh 非登录 shell 的 PATH。
 - **时区。** 站点时间是 JST。`qstat -f` 的时间不带时区，作业表的 START_DATE 不带年份。服务端统一输出带 `+09:00` 的 ISO 8601，优先用 `-f` 里的完整时间。
 
@@ -315,7 +315,7 @@ miyabi-mcp/
 | `policy.json` | 用户级默认上限 |
 | `cache/active.json` | 共享的 `qstat -ll` 快照。`qstat -ll` 返回该用户的全部作业，与项目无关；可随时删除 |
 | `projects.json`、`index/`、`locks/submit` | 跨项目的项目登记、作业索引和提交锁（7.7） |
-| `notifiers/<名>.json` | 各 notifier（daemon）的最近 poll 时间（9.3） |
+| `notifiers/<名>.json` | 各 notifier（daemon）的心跳：最近一次 poll 的开始时间、最近一次无错误 poll 的时间、实际间隔、本轮 errors，以及 daemon 报告的退出（9.3） |
 | `notifyd/` | 在登录节点上运行的 daemon 的本机状态（9.3） |
 
 **跨项目**
@@ -355,12 +355,11 @@ miyabi-mcp/
     "note": "smoke of writer v2; next: read results/metrics.json"
   },
   "state": {
-    "execution_state": "ended", "outcome": "success", "raw_state": "F Exit_status=0",
-    "pbs": {"job_state": "F", "queue": "debug-g", "exit_status": 0,
-            "qtime": "2026-10-30T17:12:05+09:00", "stime": "2026-10-30T17:15:40+09:00",
-            "obittime": "2026-10-30T17:26:01+09:00", "exec_host": "mg0123/0*72",
-            "walltime_used_s": 621, "nodect": 1},
-    "observed_at": "2026-10-30T17:27:02+09:00", "seq": 4
+    "kind": "ended", "execution_state": "ended", "outcome": "success", "raw_state": "F Exit_status=0",
+    "pbs_time": "2026-10-30T17:26:01+09:00", "exit_status": 0,
+    "pbs": {"exec_host": "mg0123/0*72",
+            "exec_vnode": "(mg0123:mem=104857600kb:ncpus=72:ngpus=1:nvnodes-g=1)"},
+    "observed_at": "2026-10-30T17:27:02+09:00", "source": "qstat -H -f", "seq": 4
   },
   "usage": {"node_hours": 0.1725, "basis": "measured", "token_reported": 0.2},
   "markers": {"started": null, "exit": null},
@@ -370,6 +369,8 @@ miyabi-mcp/
 ```
 
 `verdict` 是 agent 或人对应用层结果的结论（`unreviewed`、`verified_success`、`verified_failure`），与 PBS 的 `outcome` 分开。
+
+`state.pbs` 原样保存 PBS 打印的 `exec_host` 和 `exec_vnode`：running 和 ended 观测写入事件和记录，后来缺这两个字段的观测不覆盖已有的值。PBS 历史过期以后，仍能查到作业跑在哪个节点、哪个 MIG 切片上（`exec_host` 的 `mg1112/3*18` 中的 3），诊断节点故障或数值异常时用得上。服务端不解析它们，导出（11.2）也不包含它们。
 
 ### 7.3 事件（中性格式）
 
@@ -424,7 +425,8 @@ miyabi-mcp/
 ### 7.5 用量
 
 - **G 节点。** `node_hours = resources_used.walltime × G 节点数`，节点数取 `exec_vnode` 中 `nvnodes-g` 之和（与 `nodect` 一致），basis 为 `measured`。每个节点一块 GH200，所以 node·h 就是 GPU·h。
-- **MIG 队列。** `select` 计的是 MIG 实例。实例数取 `exec_vnode` 中 `nvnodes-mig` 之和，单位为 `mig_instance_hours`。实测的一个 debug-mig 作业是 `exec_vnode = (mg1098:mem=26214400kb:ncpus=18:ngpus=1:nvnodes-mig=1)`，即 18 核、25 GiB 主机内存，约为一个节点的 1/4。GPU 的 MIG 规格不在 PBS 记录里，要在作业内用 `nvidia-smi -L` 确认（11.2）。
+- **MIG 队列。** `select` 计的是 MIG 实例。实例数取 `exec_vnode` 中 `nvnodes-mig` 之和，单位为 `mig_instance_hours`。实测的一个 debug-mig 作业是 `exec_vnode = (mg1098:mem=26214400kb:ncpus=18:ngpus=1:nvnodes-mig=1)`，即 18 核、25 GiB 主机内存，约为一个节点的 1/4。debug-mig、short-mig、regular-mig 都是 1 个节点上 1、2 或 4 个实例（`--rsc -x` 的 `AVAIL_MIG`）。
+- **MIG 切片视作一样。** 切片由 PBS 分配，提交时不能指定（`select` 里的 `vnode` 会被 qsub 以 "Unknown Resource" 拒绝）。站点说明里 MIG#0–#2 是 32 SM、24 GB，MIG#3 是 26 SM、24 GB；11-05 对照 15 个作业，编号 0–2 是 2g.24gb，编号 3 是 1g.24gb。不同切片的算力和 BF16 数值可能不同，所以需要逐位一致的比较要放进同一个作业，规格要在作业内用 `nvidia-smi -L` 自测。计费与切片无关：批处理 MIG 每实例·小时 0.25 token，互动 MIG 不消耗 token。所以用量、预算和导出只按实例数和时间算，miyabi-mcp 不解析切片编号、不推断规格；MIG 队列的 dry-run 计划附一句固定说明（`plan.mig_slice`）。
 - **TOKEN 列。** 这是四舍五入后的站点记账值，单独记为 `reported`，与 node·h 分开，`accounting_ref` 也不同（11.2）。
 - **缺数据不补。** 没有 `resources_used.walltime`（从未开始，或历史已过期）就不记用量，不写 0。
 - **申请量分开记。** 申请量（nodes × walltime）记在 `submit.requested_node_hours`，与实际用量分开。
@@ -432,9 +434,9 @@ miyabi-mcp/
 ### 7.6 锁与写入
 
 - **记录**：先写临时文件，再 `rename` 替换。Lustre 上 rename 是原子的，实验平台已经依赖这一点。
-- **锁**：用 `os.link` 创建锁文件，目标已存在就失败（实验平台在 /work 上跨计算节点验证过这种"不存在才创建"的语义）。锁文件里写主机、pid 和时间，超过租期视为失效，可以抢占。`fcntl.flock` 在 /work 上用过（goal-wakeup、平台的 controller.lock），但跨两台登录节点的行为没有验证，所以不依赖它。
+- **锁**：用 `os.link` 创建锁文件，目标已存在就失败（实验平台在 /work 上跨计算节点验证过这种"不存在才创建"的语义）。锁文件里写主机、pid 和时间，超过租期视为失效，可以抢占。`fcntl.flock` 在 /work 上用过（goal-wakeup、平台的 controller.lock），但跨登录节点的行为没有验证，所以不依赖它。
 - **待验证**：状态都在 /work（Lustre）上。`os.link` 和 rename 的语义实验平台已在计算节点之间验证过，但还没在两台登录节点之间验证。M1 中实测：g1 和 g2 上各起一个进程，竞争同一把锁。
-- **不用 SQLite**：多个服务实例可能同时在 g1 和 g2 上写。实验平台规避网络文件系统上的 SQLite 写入，也是同一个原因。
+- **不用 SQLite**：多个服务实例可能同时在几台登录节点（g1、g2、g3）上写。实验平台规避网络文件系统上的 SQLite 写入，也是同一个原因。
 
 ### 7.7 多个项目同时进行
 
@@ -489,11 +491,11 @@ miyabi-mcp/
 | `interactive_plan` | 校验交互资源与策略，返回计划及 pi-env-mcp 终端启动参数；在 PTY 内执行后提交并记账 | 写（计划） | `call interactive_plan` → `interactive-start` |
 | `allocation_check` | 验证当前 shell 的计算节点与目标架构、nodefile 和实时 PBS 分配，报告剩余 walltime | readOnly | 在分配内 `call allocation_check` |
 | `job_cancel` | 默认 dry-run 列出目标；执行 qdel 并记录原因 | destructive | `cancel` |
-| `job_wait` | 有界等待（默认最长 45 s）多作业条件 | readOnly | `wait --jobs …` |
+| `job_wait` | 有界等待（默认最长 45 s）多作业条件；列出这些作业所属的通知和收尾方法 | readOnly | `wait --jobs …` |
 | `notify_create`、`notify_update` | 为已提交的作业、队列或到期时间创建通知；加入作业、封口 | 写（台账） | `call notify_*` |
-| `notify_list` | 通知状态、封口情况、daemon 最近 poll 时间、已投递未确认的通知 | readOnly | `call notify_list` |
-| `notify_cancel`、`notify_ack` | 撤销通知；确认已收到 | 写（台账） | `call notify_*` |
-| `ledger_query` | 台账查询和统计（node·h 申请量与实用量、按标签）；增量导出（中性事件或 smooth-research 格式） | readOnly | `ledger` |
+| `notify_list` | 通知状态、封口情况、概况（未完成数、已送达未确认数、各 daemon 的 state）、daemon 心跳和启动命令 | readOnly | `call notify_list` |
+| `notify_cancel`、`notify_ack` | 撤销未完成的通知，或把已送达未确认的通知关成 dismissed；凭 token 确认已收到 | 写（台账） | `call notify_*` |
+| `ledger_query` | 台账查询和统计（node·h 申请量与实用量、被拒和结果不确定的提交、TOKEN、策略预算，按标签）；增量导出（中性事件或 smooth-research 格式） | readOnly | `ledger` |
 | `job_annotate` | 标签、备注、应用层结论；`adopt` 把外部提交的作业纳入台账 | 写（台账） | `annotate` |
 
 ### 8.2 查询类
@@ -502,7 +504,7 @@ miyabi-mcp/
 - **`pbs_queues`**：
   - 输入：`system`（G、C 或 all）；`include`（rsc、limit、rscuse、token 中的若干项，每一项是一次 0.3–0.8 s 的命令）。
   - 输出：队列树，含路由关系（`regular-g` → small、medium、large、x-large）。每个队列有 `enabled`、`started`、节点范围、`max_elapse_s`、`remain_elapse_s`、`mem_gib`、`mig_sizes`、可用项目；另有各项目的上限和已用量、资源池占用、token 预算和 `scheduled_stop`。
-- **`job_list`**：历史默认 `days ≤ 3`、`limit ≤ 200`，并标出数据新鲜度（`observed_at`、`cache_age_s`）。按标签过滤只对台账内的作业有效。
+- **`job_list`**：历史默认 `days ≤ 3`、`limit ≤ 200`，并标出数据新鲜度（`observed_at`、`cache_age_s`）。按标签过滤只对台账内的作业有效。`fields` 只接受顶层字段名（作业表的列加 `finished`、`project`、`ledger`），未知名字和 `ledger.usage` 这样的点路径返回 `invalid_arguments`。null 有几种正常含义：排队中的作业没有开始时间、用时和 TOKEN；MIG 作业没有 nodes，节点作业没有 mig；不在本项目台账里的作业没有 ledger。
 - **`job_get`**：
   - `tail_lines`（≤ 200）只读取作业自己的 `Output_Path`/`Error_Path`，从文件末尾按字节上限读取。
   - 默认不返回完整 `Variable_List`（其中有 PATH 等大段内容，也可能有敏感值），只返回 `MIYABI_*` 和提交时 `env_names` 里列出的变量。
@@ -533,12 +535,15 @@ miyabi-mcp/
 **检查项**（每项给出 pass、warn 或 fail）：
 
 - **平面**：服务端在目标系统的登录节点上，`qsub` 可用。
-- **队列**：必须是 `--rsc -x` 中的顶层队列，状态为 ENABLE、START；节点数在路由后的子队列范围内；walltime ≤ MAX_ELAPSE；walltime 超过 REMAIN_ELAPSE 时，按策略报警或拒绝（"停机前不会开始"）；`*-mig` 队列中 `select` 计的是 MIG 实例。
+- **队列**：必须是 `--rsc -x` 中的顶层队列，状态为 ENABLE、START；节点数在路由后的子队列范围内；walltime ≤ MAX_ELAPSE；walltime 超过 REMAIN_ELAPSE 时，按策略报警或拒绝（"停机前不会开始"）；`*-mig` 队列中 `select` 计的是 MIG 实例，按 `AVAIL_MIG` 检查（1、2、4 通过，3 失败），计划里附切片说明（7.5）。
+- **select 的资源名**（`select.resources`）：按本站 qsub 手册列出的 chunk 资源（`mpiprocs`、`ompthreads`、`mem`）检查。`vnode` 直接失败，并说明节点和 MIG 切片由 PBS 分配、不能指定；格式不对的 chunk 失败；集合之外的名字给 warn，写明"未确认"。dry-run 不试投，也不用 `qsub -h` 判断服务器接不接受。
 - **项目组**：在用户的组中，且列在该队列的 PROJECT 里；未指定时，只有在唯一一个候选组时才自动选取。
-- **上限**：`--limit` 的 accepted 和 running 还有余量，并扣除保留槽位；按标签的并发；策略中的每作业上限和时间窗预算。
-- **脚本**：文件存在；`bash -n` 通过；没有残留的 `<...>` 占位符（与模板的检查相同）；解析 `#PBS` 指令，报告与命令行选项的冲突（命令行优先）；脚本在 `/tmp` 或节点本地路径下时报警。
+- **上限**：`--limit` 的 accepted 和 running 还有余量，并扣除保留槽位；按标签的并发；策略中的每作业上限、时间窗预算和项目总额 `budget`（10.1）。
+- **通知**（`notify`）：规范化后（补上默认值）放进计划和 `plan_digest`，所以同一个摘要下不能再换通知的目标、投递方式或分组；分组的当前状态（是否已封口）在 commit 时复核。
+- **脚本**：文件存在；`bash -n` 通过；没有残留的 `<...>` 占位符（尖括号内不含空格，所以 `python x.py <config.yaml >train.log`、`cat <<EOF >notes.txt` 这类重定向不算；注释照常检查，因为 `#PBS` 在 shell 看来也是注释；失败时报出行号和匹配到的文字，`allow_placeholders` 整体放行）；解析 `#PBS` 指令，报告与命令行选项的冲突（命令行优先）；脚本在 `/tmp` 或节点本地路径下时报警。
+- **工作目录**（`script.cwd`）：批处理作业从 `$HOME` 开始，`workdir` 只决定 `$PBS_O_WORKDIR`。脚本里（注释之外）没有 `cd` 或 `pushd` 时给 warn，附上示例 `cd -- "${PBS_O_WORKDIR:?}" || exit 1`（放在 `#PBS` 指令之后）。不自动往脚本里插 cd：插的位置不对会让后面的 `#PBS` 指令失效，提交的字节也不再是用户看过的脚本；也不做"cd 之前是否用了相对路径"的静态分析。
 - **工作目录与输出路径**：
-  - `workdir`（qsub 的工作目录，即作业里的 `$PBS_O_WORKDIR`）默认是项目目录。
+  - `workdir`（qsub 的工作目录，即作业里的 `$PBS_O_WORKDIR`）默认是项目目录。作业本身从 `$HOME` 开始，脚本要自己 cd。
   - 输出默认写到 `<project_dir>/.miyabi-mcp/logs/<name>-<stamp>-<id>.log`，可在 `project.json` 或每次提交时修改。
   - 输出路径必须是 /work 上的绝对路径：不能放在 `/tmp`（曾有作业从 `/tmp` 提交导致输出丢失）；放在 /home 下会报警（容量小）。
   - 父目录不存在时自动创建。
@@ -559,7 +564,7 @@ miyabi-mcp/
    - `-v` 中加入 `MIYABI_SUBMIT_ID`、`MIYABI_CLIENT_REF`、`MIYABI_PROJECT_DIR`、`MIYABI_JOB_RECORD`，以及调用方的 `env`。
    - 提交的是快照。PBS 本来就在提交时复制脚本，所以运行语义不变，而记录中的摘要与实际提交的内容一致。
 4. 解析作业号（形如 `1234567.opbs`），写入记录，创建符号链接 `jobs/<num>`，在用户级索引中追加一行，再追加 `submitted` 事件（7.3），然后释放提交锁。
-5. 如果请求里带了 `notify`，把作业加入通知（9.2），并返回 daemon 状态和要运行的命令（8.6）。
+5. 如果请求里带了 `notify`，用计划里规范化的 notify 把作业加入通知（9.2），并返回 daemon 状态和要运行的命令（8.6）。加入失败时作业已经存在，结果仍为 ok，但带 `notify_error` 和醒目的 `warning`：这次提交没有通知。
 
 **对账。** qsub 超时或输出无法解析时，记录标为 `submit_uncertain`。随后用 `qstat -f` 查看同名候选作业的 `Variable_List`，找到同一个 `MIYABI_SUBMIT_ID` 就绑定。找不到时报告不确定，必须由调用方显式传 `resubmit: true` 才会再次提交。
 
@@ -603,7 +608,7 @@ runner 对可捕获的断开信号尝试取消自己的作业；终端不支持�
 - **`ledger_query`**：
   - 范围：默认是当前项目的台账；用 `project` 参数查询其他项目。
   - 过滤条件：标签、`client_ref`、时间范围、状态、结果。
-  - `summary`：按状态、结果、标签统计数量，以及申请和实际的 node·h。
+  - `summary`：按状态、结果、标签统计数量，以及申请和实际的 node·h 或 MIG 实例·h。申请量只算拿到作业号的；被 qsub 拒绝的（`rejected`）和结果不确定的（`uncertain`）另列。TOKEN 合计单列（`token_reported`），不混进 node·h。策略有 `budget` 时另给 `budget`：已用、预留、合计、占比、阈值和缺实测的作业数（10.1），按所选记录计算，所以用标签过滤就得到阶段用量。策略文件无效时只拦写入，summary 照常返回，另附 `budget_error`。
   - `format`：`records`、`events`（带 `cursor`，可以增量导出）、`smooth-research`（第 11 节）、`csv`。
 
 ### 8.6 等待与通知类
@@ -611,7 +616,8 @@ runner 对可捕获的断开信号尝试取消自己的作业；终端不支持�
 - **`job_wait`**：
   - 输入 `job_ids`、`when`（`all_ended`、`any_ended`、`started`）和 `timeout_s`（默认上限 45 s，可配置）。
   - 有 `progressToken` 时每 10 s 发一次进度通知。
-  - 返回各作业状态和 `met`。只用于几分钟的短作业，更长的等待用通知（第 9 节）。
+  - 返回各作业状态和 `met`。只认 `ended`：unknown 的作业不算结束，也不算开始，`next` 里会请 agent 用 `job_get` 核对。只用于几分钟的短作业，更长的等待用通知（第 9 节）。
+  - 这些作业属于通知时，结果的 `notifications` 列出每个通知的 id、状态和收尾方法（未封口、已发过提前或状态不明消息、等待超时、已送达未确认等）。job_wait 不改变通知，也不返回 ack token。
 - **`job_submit` 的 `notify` 参数**：提交时把作业加入一个通知，按 `name` 创建或加入：
 
   ```json
@@ -621,8 +627,8 @@ runner 对可捕获的断开信号尝试取消自己的作业；终端不支持�
 
 - **`notify_create`**：为已提交的作业（`job_ids`，立即封口）、队列状态（`queue`）或到期时间（`timeout`）创建通知。
 - **`notify_update`**：加入作业（`add_job_ids`）、封口（`seal`）、修改 `message`。
-- **`notify_list`、`notify_cancel`、`notify_ack`**：`notify_ack(id, ack_token)` 中的 token 只出现在通知消息里，用来证明确认来自收到通知的那个 agent。
-- 以上返回值都带 `daemon` 字段：本机 notifier 的最近 poll 时间和启动命令 `start_command`。`deliver.method` 为 `listener` 时，还带 `listen_command`，供 Claude Code 用后台命令运行。
+- **`notify_list`、`notify_cancel`、`notify_ack`**：`notify_ack(id, ack_token)` 中的 token 只出现在最终的通知消息里，用来证明确认来自收到通知的那个 agent。`notify_cancel` 撤销未完成的通知；对已送达未确认的通知，它把状态记为 `dismissed`，不需要 token，也不算确认。
+- 以上返回值都带 `daemon` 字段：notifier 的 `state`（9.3）、心跳、配置的间隔和启动命令 `start_command`；`deliver.method` 为 `listener` 时还带 `listen_command`。`notify_create` 和带 notify 的 `job_submit` 另有 `next`，写明这次要运行哪条命令：每次登记或加入后都运行，不以"已在运行"为由跳过。
 
 ### 8.7 instructions 与 resources
 
@@ -630,7 +636,7 @@ runner 对可捕获的断开信号尝试取消自己的作业；终端不支持�
   - 先看 `pbs_context` 确认平面；登录节点上不跑重负载。
   - FINISH 和 Exit_status=0 都不等于应用成功。
   - 先 dry-run，再提交。
-  - 不在回合里轮询。长等待用通知：提交时带 notify，运行返回的命令，然后做别的事或结束回合；收到通知后先 ack，再检查输出。
+  - 不在回合里轮询。长等待用通知：提交时带 notify，每次都运行返回的命令（listener 时只有 `listen_command` 能显示消息，只运行 `start_command` 收不到），然后做别的事或结束回合；一个通知一个接收方；收到通知后检查输出，再用最终消息里的 token ack。
   - 等待期间先做可以并行的工作（用户 09-30 的规则）。
 - **resources（可选）**：`miyabi://rules`、`miyabi://queues`、`miyabi://jobs/{id}`。
 
@@ -642,16 +648,16 @@ runner 对可捕获的断开信号尝试取消自己的作业；终端不支持�
 
 ```
 Miyabi 登录节点（miyabi-mcp）                         agent 所在机器（notifyd，由 agent 启动）
- 项目台账：通知记录、作业事件    ◀── notify poll（每 5 分钟）───  daemon
+ 项目台账：通知记录、作业事件    ◀── notify poll（默认每 60 秒）  daemon
  共享 qstat 快照、条件判定       ─── 已触发的通知 ─────────────▶  本机投递：listener / herdr / tmux /
                                 ◀── notify report ─────────────          codex_queue / command / file
 ```
 
 - **判定在登录节点。** daemon 每次 poll，miyabi-mcp 用共享快照刷新这个 notifier 名下所有未完成通知涉及的作业（跨项目，每个用户约一次 `qstat -ll`），判定条件，返回已触发、尚未投递的消息。
 - **投递在 agent 所在机器。** daemon 在本机投递，再把结果报告回去。
-- **daemon 由 agent 启动。** 提交作业并登记通知后，agent 运行返回的 `start_command`（`notifyd ensure`）：已在运行就直接返回，否则在后台启动。没有未完成的通知时，daemon 再 poll 两次后自行退出，不留常驻进程。
+- **daemon 由 agent 启动。** 每次登记或加入通知后，agent 都运行返回的命令：`start_command`（`notifyd ensure`），或 listener 的 `listen_command`（它也会 ensure）。ensure 只看本机的状态文件和 pid，已在运行就直接返回，否则在后台启动，所以 agent 不以服务端报告的"在运行"为由跳过（11-05 定，D3）。没有未完成的通知时，daemon 再 poll 两次后报告退出并自行退出，不留常驻进程（9.3）。
 - **每台机器、每个用户一个 daemon。** 它的名字（notifier）默认是本机短主机名，服务端按名字分派通知。在登录节点上 daemon 直接调用 miyabi-mcp；在工作站上经 `ssh -o BatchMode=yes <alias> <launcher> notify poll …`，复用 ControlMaster。
-- **频率。** 默认每 300 s poll 一次。从作业结束到投递，最多约 5 分钟加一次 poll 的耗时。
+- **频率。** 用户级 `config.json` 的 `notify_poll_seconds`（默认 60 s）是唯一来源：服务端把它写进返回的 `start_command` 和 `listen_command`（`--poll-seconds`），daemon 在心跳里报告实际间隔，与配置不一致时 `daemon_info` 标出来。已在运行的 daemon 保持原间隔，直到退出或 `notifyd stop`；ensure 不假装已经换了配置。再短没有意义：共享 qstat 快照最长用 60 s 前的（`poll_max_age_s`），作业提交后 120 s 内不查历史，poll 失败时还会退避。不按 walltime 自适应：walltime 只是上限，作业提前结束或失败时更需要及时报告。60 s 是 11-05 定的（D4），此前是 300 s，实测检测延迟中位 192 s；上线第一周记录 qstat 调用次数和检测延迟，调用量有问题就改成 120 s。
 
 ### 9.2 通知与作业组
 
@@ -665,30 +671,38 @@ Miyabi 登录节点（miyabi-mcp）                         agent 所在机器�
   - 其他情况需要 `notify_update(seal=true)`。未封口的通知在 `notify_list` 中会标出来。
 - **条件**：`all_ended`（默认）、`any_ended`、`started`。也可以等队列恢复（`queue`），或到期触发（`timeout`）。
 - **提前失败通知。** `early_failure: true`（默认）时，任一成员以 failed 结束，就先单独发一条通知；组通知照常在最后发。
+- **状态不明。** 成员在活动表和历史里都查不到满 `missing_s`（默认 300 s）就记为 unknown（7.4），PBS 查询短暂故障也可能造成这种情况。unknown 不算结束，`all_ended`、`any_ended` 和 `started` 都不认它（第 4 节"未知就记为未知"）；这时单独发一条"状态不明，请用 job_get 核对"的消息，每个作业一次，组通知继续等，靠 `timeout` 兜底。
 
 ### 9.3 daemon（`miyabi-mcp notifyd`）
 
 | 命令 | 作用 |
 | --- | --- |
-| `notifyd ensure [--remote <alias>] [--notifier <名>]` | 未运行就在后台启动，并返回状态；agent 在登记通知后运行 |
+| `notifyd ensure [--remote <alias>] [--notifier <名>] [--poll-seconds <s>]` | 未运行就在后台启动，并返回状态；agent 每次登记或加入通知后都运行。已在运行的 daemon 间隔不同时，结果写明它保持原间隔 |
 | `notifyd run` | 前台运行（调试用） |
 | `notifyd status`、`notifyd stop` | 查看、停止 |
 
-- **单例。** 用本机状态目录里的锁和 pid 文件保证。工作站上的状态目录是 `${XDG_STATE_HOME:-~/.local/state}/miyabi-mcp/`；Miyabi 登录节点上是 `/work/<group>/<user>/.miyabi-mcp/notifyd/`，不写 `$HOME`。
-- **失败处理。** poll 失败后按 2、4、8 倍间隔退避。连续 3 次失败时，向上次已知的各通知目标投递一条"通知通道中断"的消息，说明原因和恢复方法（例如用 `ssh -fN miyabi-g` 重新打开主连接），不静默。
-- **心跳。** 服务端在用户级目录的 `notifiers/<名>.json` 里记录每个 notifier 的最近 poll 时间。`notify_create` 和 `notify_list` 返回 `daemon.last_poll`；超过两个周期没有 poll 时，提示运行 `start_command`。
+- **单例。** 用本机状态目录里的锁和 pid 文件保证，状态文件只在持锁时写。工作站上的状态目录是 `${XDG_STATE_HOME:-~/.local/state}/miyabi-mcp/`；Miyabi 登录节点上是 `/work/<group>/<user>/.miyabi-mcp/notifyd/`，不写 `$HOME`。
+- **失败处理。** poll 失败后按 2、4、8 倍间隔退避。poll 成功但某个项目读不出来时，结果带 `errors`：这个项目的未完成通知在刷新作业之前就已计入 `open_count` 和 `targets`，所以这一轮不算空闲，daemon 只把 targets 合并进已知目标、不覆盖。连续 3 轮出问题（整次失败或带 errors）时，向上次已知的各通知目标投递一条"通知通道中断"的消息，说明原因和恢复方法（例如用 `ssh -fN miyabi-g` 重新打开主连接），不静默；一轮干净的 poll 后重新计数。
+- **心跳与状态。** 服务端在用户级目录的 `notifiers/<名>.json` 里记录：poll 的开始时间（`last_poll`）、最近一次没有 errors 的 poll 的时间（`last_ok`）、daemon 的实际间隔、本轮 errors，以及 daemon 报告的退出（时间、原因、实例）。`daemon_info` 据此给出 `state`：`running`（两个周期加 60 s 内有 poll，且这个实例之后没有报告退出）、`idle_exited`（空闲退出；没有未完成通知时是正常状态）、`stopped`（stop、SIGTERM 或异常退出）、`stale`（心跳超时：进程可能被 `kill -9`，或连接断了）、`never`。`daemon_running` 保留给旧调用方，只在 state 为 running 时为 true。只有这个 notifier 名下有未完成通知、而 state 不是 running 时才给出 `hint`；`notify_list` 的 `summary` 给出未完成数、已送达未确认数和各 daemon 的 state。（11-01 两个通知晚到约 20 分钟，起因是 daemon 空闲退出后，服务端按旧的"两个周期内有 poll"规则仍报告它在运行。）
+- **退出与交接。** daemon 决定空闲退出时，先把本机状态写成 `exiting` 并释放锁，再用 `notify poll --exiting idle` 报告。服务端先记下退出，再照常判定。这时又有了未完成通知（或报告发不出去）时，daemon 重新取锁继续运行；取不到锁说明新 daemon 已经接手，它就退出，不再写状态文件。所以新通知恰好在 daemon 最后一次 poll 期间登记时，不会两边都以为对方在管：ensure 不把 `exiting` 当作在运行，会启动新的 daemon。stop、SIGTERM 和意外异常同样报告（`stopped`、`error`）；被 `kill -9` 时按心跳超时判为 stale。工作站上的 daemon 经 ssh 调用同一个命令，两种拓扑一致。
+- **日志。** `<状态目录>/<notifier>.log` 每行一个 JSON：`started`（pid、host、间隔、启动方式 ensure、listen 或 run）、`exited`（原因、最近一次成功 poll 的时间）、`poll_errors`、`poll_failed`、`delivered`、`broken_notice`、`resumed`、`inbox_removed`。
+- **关闭名单与收件目录。** poll 结果附上这个 notifier 最近 30 天关闭的通知（状态、关闭时间、送达时间）。daemon 先写 `closed-<notifier>.json`，再写 `known-<notifier>.json`（未完成通知的投递目标），listener 据此说明退出原因（9.4）。通知确认、取消或 dismissed 满 7 天后，daemon 删掉它的收件目录；已送达未确认的保留，消息可能还没被读。
 - **本机需要一份 miyabi-mcp。** 即仓库克隆加 `uv sync`。daemon 只用标准库部分，不依赖 MCP SDK。
 
 ### 9.4 投递方式（在 agent 所在机器上执行）
 
 | method | 机制 | 适用 | 状态 |
 | --- | --- | --- | --- |
-| `listener`（默认） | daemon 把消息写入本机收件目录。agent 先用后台命令运行 `listen_command`（`notify listen --id N`），收到消息就退出，退出提示里就是通知内容。listen 还会确保 daemon 在运行 | Claude Code：agent 忙时提示排队，空闲时开始新回合 | 待实测。同一机制（后台命令退出）已在旧 waiter 上实测通过（10-30） |
+| `listener`（默认） | daemon 把消息写入本机收件目录就算送达。agent 用后台命令运行 `listen_command`（`notify listen --id N`），收到消息就退出，退出提示里就是通知内容。listen 还会确保 daemon 在运行。没人运行 `listen_command` 时消息就停在收件目录里：只运行 `start_command` 收不到。收件目录先到先得，不是广播 | Claude Code：agent 忙时提示排队，空闲时开始新回合；其他 agent 用 listener 时同样要运行 `listen_command` | 待实测。同一机制（后台命令退出）已在旧 waiter 上实测通过（10-30） |
 | `herdr` | `herdr agent prompt <agent> "<msg>"`，可加 `--machine` | herdr 中的任意 TUI agent（Claude Code、Codex、pi） | 未验证。agent 停在对话框时返回 agent_blocked，稍后重试 |
 | `tmux` | `tmux send-keys -l` 后再按 Enter | tmux 中的 agent | 未验证，兜底 |
 | `codex_queue` | `codex queue --thread … --remote unix://…`，用本机的 app-server | Codex | 旧实现实测确认 21 次，需在 0.163 上复验 |
 | `command` | 运行本机 daemon 配置中具名的命令，消息 JSON 从 stdin 传入 | 自定义 | — |
 | `file` | 追加到本机的一个文件 | 轮询或其他系统 | — |
+
+`notify listen` 的退出码：0 打印了消息；3 这个通知对该 notifier 已不再未完成，提示写明原因：已取消（时间）；已送达（时间。listener 投递的"已送达"只代表写进了收件目录，不代表 agent 看到了），本机收件目录显示它在某时被取走；或者不在这个 notifier 的名单里，请用 `notify_list` 查它属于哪个 notifier；75 daemon 无法维持。退出码不按原因细分，agent 读的是提示文字。
+
+`codex_queue` 和 `herdr` 仍待验证，验证之前不改默认投递方式。
 
 `codex_goal`（恢复暂停的 Goal）需要在登记通知时于本机读取 Goal 快照，推迟到 v0.2。
 
@@ -706,16 +720,20 @@ Acknowledge: notify_ack(id="N-20261030-181500-ab12", ack_token="k3f9q")
 
 消息控制在约 2 KB 以内，详细信息让 agent 用 `job_get` 去取。
 
+只有最终消息带 ack 那一行。提前失败和状态不明的消息写明"组通知仍在等待，这条不需要确认"，不带 token：照着它立刻 ack 会因为通知仍未完成而失败；ack 恰好落在最终消息已触发、还没投递的时候，通知会变成 acknowledged，最终消息就再也发不出去。listener 投递时，这两种消息还提醒再运行一次 `listen_command` 继续等。
+
 ### 9.6 状态与确认
 
 ```
 open ─封口─▶ sealed ─条件满足或超时─▶ fired ─投递─▶ delivered ─ack─▶ acknowledged
-  └──────────── cancelled ◀───────────────┘           └─▶ failed（多次投递失败，原因可见）
+  └──────────── cancelled ◀───────────────┘    │            └─notify_cancel─▶ dismissed
+                                                └─▶ failed（多次投递失败，原因可见）
 ```
 
 - 投递至少一次，agent 用 ack token 去重。
 - 投递失败（例如 herdr 一直 blocked）超过 5 次就标为 failed，并在 `notify_list` 中显示原因。
-- 提前失败通知不改变组通知的状态。
+- 提前失败和状态不明的消息不改变组通知的状态。
+- 已送达却没人确认的通知（例如没人运行 `listen_command`，消息从没被读），用 `notify_cancel` 关成 `dismissed`：不需要 token，也不算确认；8.6 的 token 规则不变，dismissed 之后仍可凭 token ack（11-05 定，D6）。job_wait 只列出通知和收尾方法，不返回 token。
 
 ### 9.7 各场景的推荐用法
 
@@ -725,13 +743,15 @@ open ─封口─▶ sealed ─条件满足或超时─▶ fired ─投递─▶
 | 工作站（MCP 经 ssh） | 同上，daemon 在工作站上经 ssh poll | 同上 | 同上 |
 | 编排者通知 worker | `deliver={"method": "herdr", "agent": "<worker>"}`；会话内 subagent 由编排者收到通知后用 SendMessage 转达 | | |
 
+**一个通知一个接收方**（11-05 定，D5）。通知归提交作业的 agent：结果出来后要接着干活的是它。协调者用 `notify_list`、`job_get` 看状态，不开 listener。双方都要被唤醒时，为同一组作业建两个通知（不同 `name`，各自的投递方式），不共用一个收件目录：listener 收件目录先到先得，两个人一起听，总有一个以退出码 3 结束。
+
 典型流程（工作站上的 Claude Code，三个 seed）：
 
 1. 三个 seed 各提交一次：先 `job_submit(dry_run)`，再 `job_submit(…, notify={"name": "E12-seeds", "expected": 3, "message": …})`。
-2. 第一次提交后，在后台运行返回的 `listen_command`；它会启动本机 daemon。
+2. 第一次提交后，在后台运行返回的 `listen_command`；它会启动本机 daemon。后两次加入同一个通知时 listener 已在运行，按返回的 `next` 运行 `start_command`（幂等），不开第二个 listener。
 3. 继续做不依赖这些作业的工作。
-4. 三个 seed 都结束后（最多晚约 5 分钟），listener 退出，会话收到汇总通知。中途有 seed 失败时，会先收到一条提前通知，之后再运行一次 `listen_command` 继续等组通知。
-5. 用 `job_get` 读输出，`notify_ack`，再把台账导出给 smooth-research。
+4. 三个 seed 都结束后（通常晚 1 分钟上下），listener 退出，会话收到汇总通知。中途有 seed 失败时，会先收到一条提前通知（不需要确认），之后再运行一次 `listen_command` 继续等组通知。
+5. 用 `job_get` 读输出，用最终消息里的 token `notify_ack`，再把台账导出给 smooth-research。
 
 ## 10. 安全、权限与策略
 
@@ -755,6 +775,19 @@ open ─封口─▶ sealed ─条件满足或超时─▶ fired ─投递─▶
 用户级目录中的 `policy.json` 有两个作用：给各项目提供默认值，并设定用户在所有项目上的合计上限（活动作业数、时间窗内的 node·h）。项目 `.miyabi-mcp/policy.json` 设定本项目的份额和每作业上限。三层上限（组、用户、项目）的检查顺序见 7.7。
 
 数值只是示例。"每作业 16 node·h"和"每 worker 6 个"来自 3.4 中的项目约定；"保留 4 个 accepted 槽位"来自实验平台。上限只用于检查，永远不作为申请的 walltime。
+
+**项目总额 `budget`**（11-05 加）。与 `budget_windows` 并存：时间窗在单一单位内比较一段时间的申请量；`budget` 按"已结束的实测加未结束的预留"限制整个项目，跨单位折算。
+
+```json
+{"budget": {"unit": "node_hours", "limit": 200, "warn_at": 0.8,
+            "factors": {"node_hours": 1, "mig_instance_hours": 0.25},
+            "source": "bypass-lora docs/constraints.md:34"}}
+```
+
+- 预计用量 = 已结束作业的实测 + 未结束作业的预留 + 本次请求，各乘其台账单位的系数。预留按请求量（单元数 × walltime）算；运行中的作业只算完整预留，不再加它的部分实测。累加历史申请量会高估（bypass-lora 申请 279.03 MIG-h，实用 152.99），只看实测又会漏掉在跑的作业。
+- 被 qsub 拒绝的不算；`FINISH no-start`（从未运行）记 0；已结束但缺实测的、排队、运行、unknown 和提交结果不确定的，都按请求量预留，直到台账知道更多。接管（adopt）的作业也算。
+- 预计用量超过 `limit` 时 dry-run 失败；commit 时在用户级提交锁里再算一次（先按共享快照刷新台账），所以几次并发提交不会一起越线。到 `warn_at × limit`（默认 80%）只给 warn。要继续，由用户在 policy.json 里提高 `limit`（11-05 定，D7）。
+- `factors` 缺少某个台账单位时 fail closed（无法判断就拦截）。站点 TOKEN 不进 `budget`：它的系数按系统而定，互动队列也有例外。阶段额度（例如某阶段不超过 10 node·h）不进策略：作业带上阶段标签后，`ledger_query(format="summary", labels=…)` 的 `budget` 就是该阶段的用量。
 
 ### 10.2 权限提示与工具注解
 
@@ -828,12 +861,12 @@ open ─封口─▶ sealed ─条件满足或超时─▶ fired ─投递─▶
   | 类别 | accounting_ref | unit | resource_type | hardware | basis |
   | --- | --- | --- | --- | --- | --- |
   | G 节点 | `miyabi-pbs:<job_id>` | `node_hours` | `gpu_node` | `GH200` | `measured` |
-  | MIG 实例 | `miyabi-pbs:<job_id>` | `mig_instance_hours` | `gpu_mig_instance` | `GH200 MIG 2g.24gb` | `measured` |
+  | MIG 实例 | `miyabi-pbs:<job_id>` | `mig_instance_hours` | `gpu_mig_instance` | `GH200 MIG`（`mig_hardware`） | `measured` |
   | TOKEN（只在调用方要求时导出） | `miyabi-pbs:<job_id>:token` | `miyabi_token` | `site_allocation` | — | `reported` |
 
   - `source_ref` 写计算依据，格式固定为 `"resources_used.walltime=00:10:17 x nvnodes-g=1"`（MIG 为 `nvnodes-mig=<n>`）。`quantity` 用事件里存下的 6 位小数值（7.3）。smooth-research 按规范化 JSON 比较内容，值必须完全相同。
   - smooth-research 遇到同一个 `accounting_ref` 出现不同数值会报 CONFLICT，所以 TOKEN 必须用不同的 ref。
-  - MIG 的 `hardware` 字符串一旦使用就不能再改，否则累计会分裂。PBS 记录里只有 `nvnodes-mig=1`、18 核、25 GiB 主机内存，没有 GPU 的 MIG 规格；10-30 的实测作业里 `nvidia-smi -L` 显示 "NVIDIA GH200 120GB" 上的 `MIG 2g.24gb`，所以定为 `"GH200 MIG 2g.24gb"`，写在用户级 `config.json` 的 `mig_hardware` 里。
+  - MIG 的 `hardware` 字符串一改，累计就会分裂，所以不轻易改。它写在用户级 `config.json` 的 `mig_hardware` 里，在作业被观测到结束时读取，每个作业只有这一次带 usage 的事件，所以改配置只影响改动之后结束的作业，同一个 `accounting_ref` 不会出现两种内容。10-30 的实测作业里 `nvidia-smi -L` 显示 "NVIDIA GH200 120GB" 上的 `MIG 2g.24gb`，当时定为 `"GH200 MIG 2g.24gb"`。后来查明切片由 PBS 分配，1g.24gb 也会出现，而计费与切片无关（7.5），这个标签会让读账本的人以为所有作业都在 2g 上，所以 11-05 改为 `"GH200 MIG"`，不写规格（D2）。代价是跨越改动的项目在 smooth-research 里多一行 MIG 累计，两行只有 hardware 不同，可以直接相加。以后实现 reconciled 更正时，要沿用原事件的标签。MCP 服务只在启动时读一次配置，已在运行的服务要重启后才用新标签；登录节点上的 notifyd 每次 poll 都重新读取。
 - **摘要格式。** 用 `blake2b:<hex>`，`digest_size=32`，与 smooth-research 一致；项目规则不允许 SHA-256。
 - **契约样例。** smooth-research 仓库的 `tests/fixtures/miyabi_mcp_export.jsonl`（commit 9398c63，已按 7.3 对齐）按本节，用一个真实作业的 `qstat -H -f` 生成，是 M2 导出的对照基准。字段有出入时以本设计为准，并通知对方修改样例。
 
@@ -849,7 +882,7 @@ open ─封口─▶ sealed ─条件满足或超时─▶ fired ─投递─▶
 1. **离线（不需要新作业）。** 对一个已经结束的作业跑 `qstat -H -f`，按 7.3、7.4、11.2 生成事件，导出 Observation 和 Usage，交给 `rl run record` 和 `rl run usage`，检查去重和排序。smooth-research 一侧正在做这一步，会把匿名化样例放进它的契约测试，供 M2 的导出逐字节对照。
 2. **在线。** 测试要求经过 miyabi-mcp，所以要等 v0.1 的 M1 和 M2 可用（提交、台账、smooth-research 导出）；没有 M3 时先用 `job_wait` 代替通知。
    - smooth-research 一侧转述的用户授权上限：`debug-mig`、`select=1`、walltime 10 分钟、最多 6 个作业、合计不超过 0.5 node·h；日志用 `-o` 指到 `/work/<group>/<user>/tmp/` 下的新目录。
-   - 第一个 MIG 作业里运行 `nvidia-smi -L`，用来确定 11.2 中的 `hardware` 字符串。
+   - 第一个 MIG 作业里运行 `nvidia-smi -L`，用来确定 11.2 中的 `hardware` 字符串（后来改为不写规格，见 11.2）。
    - 查询时 debug-mig 占用 12%，debug-g 占用 94%。
 3. **代码。** 从只读快照运行（11.1），提交时检查可写目录（8.3）。
 
@@ -916,10 +949,13 @@ open ─封口─▶ sealed ─条件满足或超时─▶ fired ─投递─▶
 
 ### 13.3 skill 的迁移
 
-- v0.1 发布后，四个 SKILL.md 改为"有 MCP 工具时优先用工具，否则用 CLI"，保留知识部分。
-- `qstat_json.py`、`context.py`、`job_wakeup.py` 保留一个版本，作为调用新包的兼容层，之后删除；`qstat_json.py` 不再有两份副本。
-- 作业脚本模板改为通过 `MIYABI_MCP` 的路径调用 context 检查，并可选加载 job hook。
-- 更新仓库 README 的组件表和安装说明。
+11-05 定：miyabi-mcp 是 agent 操作 PBS 的标准方式，不另设 skill（用法写在服务器 instructions 里，前 512 字符自成一体）。
+
+- `miyabi-pbs-cmd`、`miyabi-pbs-goal-wakeup` 标为过时：description 和 `agents/openai.yaml` 指向 miyabi-mcp，正文前加过时说明（cmd 附命令对照表），正文留作背景。Codex 的 skills 链接已删除；仓库 README 的安装只链接仍在用的 skill。
+- `miyabi-pbs-shell-template`、`miyabi-ml-experiment-platform` 中的查询、提交和等待改指向 miyabi-mcp。
+- `context.py` 仍是作业内的计算节点检查：模板和 `pilot.pbs` 经 checkout 中的路径（`MIYABI_PBS_CMD_ROOT`）调用，不经 skills 链接。模板改为通过 `MIYABI_MCP` 的路径调用检查（可选加载 job hook）之前，它留在 `miyabi-pbs-cmd`。
+- `qstat_json.py`、`job_wakeup.py` 随 skill 保留，不再推荐；已注册的 wake-up 运行到触发为止。
+- 恢复暂停的 Codex Goal 尚无替代，待 v0.2 的 `codex_goal` 投递。
 
 ## 14. 待决问题
 
@@ -929,6 +965,6 @@ open ─封口─▶ sealed ─条件满足或超时─▶ fired ─投递─▶
 4. **注册名**：用 `miyabi-pbs`？
 5. **channels**：research preview 阶段是否值得做实验性支持？
 6. **Miyabi-C**：支持到什么程度？解析逻辑共用，但 C 侧还没有实测。
-7. **MIG 的 hardware 字符串**：已定，10-30 实测为 `GH200 MIG 2g.24gb`。命名空间也已与 smooth-research 商定为 `miyabi-pbs`（11.2）。
+7. **MIG 的 hardware 字符串**：已定为 `GH200 MIG`（11-05）。10-30 实测的 `GH200 MIG 2g.24gb` 只是那一个作业分到的切片；切片由 PBS 分配，计费相同，标签不写规格（7.5、11.2）。命名空间已与 smooth-research 商定为 `miyabi-pbs`（11.2）。
 8. **公开发布**：仓库是否公开、用什么许可证，以及文档中保留多少带日期的站点实测数字。
 9. **pilot pool**：是否列入路线图，还是只在实验平台 skill 中保留方法论？
