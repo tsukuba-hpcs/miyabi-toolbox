@@ -8,7 +8,7 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from . import __version__, config, context, export, notify, observe, parse, policy as policies, states
+from . import config, context, export, notify, observe, parse, policy as policies, states, version
 from .config import Settings
 from .ledger import Store, host, index_append, index_owner, index_owners, job_num, submit_lock
 from .pbs import Completed, Pbs
@@ -41,7 +41,7 @@ def _match(details: dict, job_id: str) -> tuple[str, dict] | tuple[None, None]:
 # -- pbs_context, pbs_queues --------------------------------------------------------------------------------------
 
 def pbs_context(settings: Settings, args: dict) -> dict:
-    result = ok(server={"name": "miyabi-mcp", "version": __version__, "python": sys.version.split()[0],
+    result = ok(server={"name": "miyabi-mcp", **version.describe(), "python": sys.version.split()[0],
                         "host": host()},
                 context=context.inspect(target_system=args.get("target_system")),
                 settings=config.describe(settings))

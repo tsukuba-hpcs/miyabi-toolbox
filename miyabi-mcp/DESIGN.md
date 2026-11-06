@@ -234,6 +234,7 @@ tool_timeout_sec = 120
 - **MCP 协议层用官方 Python SDK**（`mcp`，锁定在 1.x）。用它的低层 `Server` 接口显式声明每个工具的 `inputSchema`、`outputSchema` 和注解，返回 `structuredContent`，同时附带文本形式的 JSON。进度通知、取消、实验性的 `claude/channel` 也通过 SDK 实现。
 - **核心逻辑只用标准库**，不导入 SDK。CLI，以及以后在计算节点上运行的部分（作业内标记、pilot），都不依赖 MCP。
 - **长调用**支持取消和进度通知：Codex 和 pi 默认单次调用超时 60 s，pi 收到进度通知会重置超时。
+- **报告运行的代码版本。** MCP 服务的生命周期跟随客户端会话，一直运行启动时的代码；克隆更新以后，agent 读到的 README、DESIGN 可能比它连着的服务新。11-06 联合测试中，协调者把这种版本差当成了缺陷。所以服务启动时记下克隆所在的提交：`serverInfo.version` 为 `0.1.0+<提交>`，`pbs_context.server` 带 `commit`；克隆已经前进时（每个工具调用最多每分钟查一次 `git rev-parse`），每个结果附 `server_note`，`pbs_context.server` 另带 `checkout` 和 `restart_needed`，请 agent 重启 MCP 服务（重启它的 MCP 客户端）。CLI 每次调用都是新进程，不会落后。
 
 ### 6.2 目录
 

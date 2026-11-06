@@ -13,7 +13,7 @@ import mcp.types as types
 from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 
-from . import __version__, tools
+from . import tools, version
 from .config import Settings
 from .util import compact
 
@@ -52,7 +52,8 @@ miyabi-mcp operates Miyabi PBS for this project: queries, submission, cancellati
 
 
 def build(settings: Settings) -> Server:
-    server: Server = Server("miyabi-mcp", version=__version__, instructions=INSTRUCTIONS)
+    # version.label() pins the commit this server runs (a long-lived server keeps it while the checkout moves on).
+    server: Server = Server("miyabi-mcp", version=version.label(), instructions=INSTRUCTIONS)
 
     @server.list_tools()
     async def list_tools() -> list[types.Tool]:
@@ -85,6 +86,9 @@ def build(settings: Settings) -> Server:
         except anyio.get_cancelled_exc_class():
             stop.set()
             raise
+        note = version.stale_note()
+        if note:
+            result = {**result, "server_note": note}
         return types.CallToolResult(content=[types.TextContent(type="text", text=compact(result))],
                                     structuredContent=result, isError=not result.get("ok", False))
 

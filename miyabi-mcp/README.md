@@ -54,6 +54,10 @@ pi: `pi mcp add -l miyabi-pbs -- ssh -T -o BatchMode=yes miyabi-g <path>/bin/miy
 Agents that only have a shell (for example through pi-env-mcp's `bash`) use the CLI:
 `bin/miyabi-mcp --project-dir <dir> call <tool> '<json arguments>'` prints the same JSON as the tool.
 
+A server keeps the code it started with for as long as its client runs. `serverInfo.version` and
+`pbs_context.server.commit` name that commit. Once the checkout has moved on, every result carries a
+`server_note`; restart the agent's MCP client to load the new code, since this README may already describe it.
+
 ## Where things are written
 
 Nothing goes to `$HOME` on Miyabi. Everything a project keeps is under `<project>/.miyabi-mcp/` (mode 700,
@@ -113,7 +117,7 @@ measurement); filtered by `labels` it gives one stage's use. The site's TOKEN st
 
 | Tool | Does |
 | --- | --- |
-| `pbs_context` | plane, host, project and state directory, PBS projects, scheduled stop, effective policy |
+| `pbs_context` | plane, host, project and state directory, PBS projects, scheduled stop, effective policy, the server's version and commit |
 | `pbs_queues` | queue shapes and status (REMAIN_ELAPSE), project limits, occupancy, token budget |
 | `job_list`, `job_get` | jobs from one shared `qstat -ll` snapshot (`fields` picks top-level fields); details from `qstat [-H] -f`; output tails |
 | `job_submit` | dry run → checked plan + `plan_digest` (covering `notify`); same arguments + `dry_run=false` + digest → qsub; `notify` adds the job to a notification group; a commit with a used `request_key` returns that job, even after its plan expired; array jobs (`array`, `#PBS -J`) are refused for now: submit the members separately with a notify group |

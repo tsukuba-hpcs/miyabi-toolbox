@@ -8,6 +8,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from base import ROOT, FakePbsCase
+from miyabi_mcp import version
 
 
 class ServerTests(FakePbsCase):
@@ -35,6 +36,9 @@ class ServerTests(FakePbsCase):
 
         init, listed, context, plan, bad, missing = self.run_session(body)
         self.assertEqual(init.serverInfo.name, "miyabi-mcp")
+        self.assertEqual(init.serverInfo.version, version.label())  # 0.1.0+<commit of the checkout>
+        self.assertEqual(context.structuredContent["server"]["commit"], version.running())
+        self.assertNotIn("server_note", context.structuredContent)  # the checkout has not moved on
         self.assertIn("job_submit (dry run)", init.instructions)
         names = {tool.name for tool in listed.tools}
         self.assertEqual(names, {"pbs_context", "pbs_queues", "job_list", "job_get", "job_submit", "job_cancel",
@@ -87,3 +91,21 @@ class ServerTests(FakePbsCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VersionTests(unittest.TestCase):
+    def test_a_server_behind_its_checkout_says_so(self):
+        current = version.checkout_commit()
+        self.assertIsNotNone(current)  # the tests run from a git checkout
+        saved = dict(version._cache)
+        self.addCleanup(lambda: (version._cache.clear(), version._cache.update(saved)))
+        version._cache.clear()
+        version._cache["running"] = "0000000"  # as if the server started before the latest commit
+        note = version.stale_note(max_age=0)
+        self.assertIn(f"runs 0000000, but its checkout is now at {current}", note)
+        described = version.describe()
+        self.assertEqual((described["commit"], described["checkout"]), ("0000000", current))
+        self.assertIn("Restart the MCP server", described["restart_needed"])
+        version._cache["running"] = current
+        self.assertIsNone(version.stale_note(max_age=0))
+
