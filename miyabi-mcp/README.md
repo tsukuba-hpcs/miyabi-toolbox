@@ -5,7 +5,7 @@ query queues and jobs, submit and cancel jobs within a project policy, keep a pe
 and get notified when jobs (or groups of jobs) end. Design and rationale: [DESIGN.md](DESIGN.md) (Chinese).
 
 The server always runs on a Miyabi login node, next to PBS. An agent on a login node starts it directly;
-an agent elsewhere starts the same server over `ssh`. It never runs workloads: those go to PBS jobs.
+an agent elsewhere has pi-env-mcp run it there. It never runs workloads: those go to PBS jobs.
 Notifications are delivered by a small daemon on the agent's own machine, which the agent starts.
 
 ## Install
@@ -25,44 +25,64 @@ CPU architecture: on Miyabi-C login nodes build another one with
 
 ## Register with an agent
 
-Register per project; `--project <name>` means `/work/<group>/<user>/<name>`, `--project-dir` takes any path.
-For an agent on another machine, also tell the server that machine's name (`--notifier`), where
-`bin/miyabi-mcp` lives there (`--local-launcher`) and the ssh alias of the login node (`--remote-alias`), so the
-commands it returns run as they are.
+An agent on a workstation reaches the server through pi-env-mcp, which runs it on the login node inside the
+connection it already holds: register the server with pi-env-mcp, and only pi-env-mcp with the agent. The
+server's tools then appear as `miyabi_pbs__<tool>`; in Claude Code, with pi-env-mcp registered as `miyabi-g`,
+that is `mcp__miyabi-g__miyabi_pbs__job_submit`. Without `npm link`, use `node <pi-env-mcp>/dist/cli.js` for
+`pi-env-mcp`.
 
 ```bash
-# Claude Code on a workstation (uses your ssh ControlMaster for miyabi-g; open it with `ssh -fN miyabi-g`)
-claude mcp add --scope local miyabi-pbs -- \
-  ssh -T -o BatchMode=yes miyabi-g /work/<group>/<user>/miyabi-toolbox/miyabi-mcp/bin/miyabi-mcp serve \
-  --project <project> --notifier $(hostname -s) --local-launcher <clone>/miyabi-mcp/bin/miyabi-mcp --remote-alias miyabi-g
+# On the workstation, where the login node is a pi-env-mcp host named miyabi-g (pi-env-mcp add, trust)
+pi-env-mcp mcp add miyabi-pbs --host miyabi-g -- \
+  /work/<group>/<user>/miyabi-toolbox/miyabi-mcp/bin/miyabi-mcp serve --project <project> \
+  --notifier $(hostname -s) --local-launcher <clone>/miyabi-mcp/bin/miyabi-mcp --remote-alias miyabi-g
+pi-env-mcp mcp list      # starts it on the login node and lists its tools; exit 1 if it fails
 
-# Claude Code on a Miyabi login node
+# The agent registers pi-env-mcp only
+claude mcp add --scope user miyabi-g -- pi-env-mcp serve --host miyabi-g
+
+# An agent on a Miyabi login node starts the server itself
 claude mcp add --scope local miyabi-pbs -- \
   /work/<group>/<user>/miyabi-toolbox/miyabi-mcp/bin/miyabi-mcp serve --project-dir /work/<group>/<user>/<project>
 ```
 
 ```toml
-# Codex (~/.codex/config.toml); pass `project` in tool calls for other projects
-[mcp_servers.miyabi-pbs]
-command = "ssh"
-args = ["-T", "-o", "BatchMode=yes", "miyabi-g", "<path>/bin/miyabi-mcp", "serve", "--project", "<project>",
-        "--notifier", "<this machine>", "--local-launcher", "<clone>/miyabi-mcp/bin/miyabi-mcp"]
-tool_timeout_sec = 120
+# Codex (~/.codex/config.toml)
+[mcp_servers.miyabi-g]
+command = "pi-env-mcp"
+args = ["serve", "--host", "miyabi-g"]
+tool_timeout_sec = 3600   # as pi-env-mcp's README advises: Codex waits 60 s by default
 ```
 
-pi: `pi mcp add -l miyabi-pbs -- ssh -T -o BatchMode=yes miyabi-g <path>/bin/miyabi-mcp serve --project <project> …`.
+- `--project <name>` means `/work/<group>/<user>/<name>`; `--project-dir` takes any path. Without either, pass
+  `project` in tool calls: a hosted server starts in the host's cwd (else the remote home), which names no project.
+- `--notifier`, `--local-launcher` and `--remote-alias` tell the server the agent's machine, where
+  `bin/miyabi-mcp` lives there and what that machine calls the login node, so the commands it returns run as
+  they are. `--remote-alias` is both the pi-env-mcp host (the `terminal_open.host` of interactive plans) and the
+  ssh alias that notifyd and `export_command` use: give the two the same name.
+- In pi-env-mcp's `config.json`, give the entry `"timeout": 300` (`mcp add` has no option for it). pi-env-mcp
+  allows a hosted server 60 s per request, counted again from each progress report. job_wait reports progress
+  and stops at 45 s by default, but a submit (lock, qsub, first look) reports none. A call that times out is
+  cancelled on the server, yet a submit may already have gone through: retry it with the same `request_key`,
+  which returns that job, or check `job_list` before submitting again.
+- Do not set `--description` for it: pi-env-mcp shows that instead of the server's instructions.
 
-One ssh master connection to Miyabi carries at most 10 sessions at once. Every MCP client that reaches Miyabi
-through it (miyabi-mcp serve, pi-env-mcp) holds one for as long as it runs, and notifyd's polls take one
-briefly. Past that, ssh reports `Session open refused by peer` and then `Permission denied (publickey)`: its
-fallback to a direct connection cannot log in under BatchMode. Close MCP clients you no longer need. notifyd
-retries a refused session twice, then reports `ssh_sessions_full`.
+notifyd and `export_command` still reach the login node with plain `ssh -T -o BatchMode=yes <alias>`, through
+your ssh master connection (open it with `ssh -fN miyabi-g`).
+
+One ssh master connection to Miyabi carries at most 10 sessions at once. Every `pi-env-mcp serve` (one per
+agent; the servers it hosts take none of their own) holds one for as long as it runs, and notifyd's polls and
+`export_command` take one briefly. Past that, ssh reports `Session open refused by peer` and then
+`Permission denied (publickey)`: its fallback to a direct connection cannot log in under BatchMode. Close agents
+and MCP clients you no longer need. notifyd retries a refused session twice, then reports `ssh_sessions_full`.
 Agents that only have a shell (for example through pi-env-mcp's `bash`) use the CLI:
 `bin/miyabi-mcp --project-dir <dir> call <tool> '<json arguments>'` prints the same JSON as the tool.
 
-A server keeps the code it started with for as long as its client runs. `serverInfo.version` and
-`pbs_context.server.commit` name that commit. Once the checkout has moved on, every result carries a
-`server_note`; restart the agent's MCP client to load the new code, since this README may already describe it.
+A server keeps the code it started with for as long as its client runs. `pbs_context.server.commit` names that
+commit (so does `serverInfo.version`, which pi-env-mcp does not pass on). Once the checkout has moved on, every
+result carries a `server_note`; restart the server to load the new code, since this README may already describe
+it. Behind pi-env-mcp, either reconnect the host with its `hosts` tool (`reconnect: true`, which also closes that
+host's terminals) or restart the agent's pi-env-mcp.
 
 ## Where things are written
 
@@ -405,3 +425,13 @@ A second allocation on `mg0032` (`3752112.opbs`) ran all 52 tests successfully, 
 active jobs left in the test project. Transcript tails, idempotent launch retries and rejection of login-side
 allocation checks were also verified. C and MIG interactive allocations, and real connection-loss cleanup, remain untested live;
 fake-PBS tests cover C/MIG planning and disconnect cleanup before and after receipt of the job ID.
+
+Hosted by pi-env-mcp (2026-11-06, commit 69f2f5a on miyabi-g1): smooth-research's joint test ran a Claude and a
+Codex coordinator against the hosted server with read-only calls and dry runs. A run of the hosted server on the
+fake PBS checked the rest:
+- job_wait progress kept a 90 s call past pi-env-mcp's 60 s request timeout;
+- a cancelled wait stopped polling, and the next call was answered within 0.08 s;
+- a job that ended during a wait was reported 6 s later;
+- when the client closed pi-env-mcp's stdin, pi-env-mcp exited 0.11 s later and left no process on the node.
+
+notifyd and `export_command`, still over ssh, were not exercised in this round.

@@ -5,7 +5,7 @@
 ## 0. 摘要
 
 1. **定位。** 把 miyabi-toolbox 中可执行的 PBS 能力做成一个 MCP 服务（本目录 `miyabi-mcp/`），给 Claude Code、Codex、pi 等 agent 提供结构化、可审计、带护栏的 Miyabi 作业接口。四个 skill 保留为知识（作业脚本模板、实验平台方法论、站点规则），脚本迁入服务。
-2. **服务端始终运行在 Miyabi 登录节点上**，因为 PBS 命令、作业日志和共享文件系统都在那里。agent 在登录节点上时直接以 stdio 启动；agent 在工作站上时用 `ssh -T miyabi-g … serve` 启动同一个服务，复用 pi-env-mcp 已在用的 ControlMaster。miyabi-mcp 不依赖 pi-env-mcp，两者并列：pi-env-mcp 管文件、终端和传输，miyabi-mcp 管 PBS 语义。
+2. **服务端始终运行在 Miyabi 登录节点上**，因为 PBS 命令、作业日志和共享文件系统都在那里。agent 在登录节点上时直接以 stdio 启动；agent 在工作站上时，由 pi-env-mcp 在登录节点上托管同一个服务（`pi-env-mcp mcp add`），服务跑在 pi-env-mcp 已有的连接里，agent 只注册 pi-env-mcp（5.1、5.3）。分工不变：pi-env-mcp 管连接、文件、终端和传输，miyabi-mcp 管 PBS 语义；miyabi-mcp 的代码不依赖 pi-env-mcp，在登录节点上也可以直接以 stdio 启动。
 3. **运行环境。** 服务运行在 `miyabi-mcp/.venv` 中（uv 管理，Python ≥ 3.11）。在 Miyabi 上以系统自带的 `/usr/bin/python3.11` 为基础建 venv，不下载解释器，也不往 `$HOME` 写。MCP 协议层用官方 Python SDK，核心逻辑只用标准库。每个工具都有对应的 CLI 子命令，输出同一份 JSON，所以只有 shell 的 agent（例如经 pi-env-mcp 的 `bash`）也能用。
 4. **v0.1 覆盖前五项需求**：查询（`pbs_context`、`pbs_queues`、`job_list`、`job_get`）；提交（`job_submit`，先 dry-run 出计划，再凭计划摘要提交）；取消（`job_cancel`）；记录与管理（作业台账、事件日志、查询与导出）；通知（`job_wait` 有界等待；作业组通知、agent 所在机器上的 daemon 投递、确认）。第六项（pilot 占位排队与任务打包）排在 v0.3。
 5. **通知（原称"唤醒"）。** agent 等作业时可能正在做别的事，所以这里是"通知"而不是"唤醒"。
@@ -157,25 +157,26 @@
 
 ```
  工作站                                          Miyabi 登录节点（g1、g2、g3 之一）
-┌───────────────────────────────┐            ┌────────────────────────────────────────────┐
-│ Claude Code / Codex / pi      │            │                                            │
-│                               │  B: ssh -T │                                            │
-│  MCP miyabi-pbs ──────────────┼───────────▶│ miyabi-mcp serve ──▶ qstat / qsub / qdel   │
-│                               │            │        │                                   │
-│  MCP miyabi-g (pi-env-mcp) ───┼─ C ───────▶│ pi-env daemon ──▶ bash: miyabi-mcp <cmd>   │
-│                               │            │        │                                   │
-│  notifyd: ssh … notify poll ──┼───────────▶│ miyabi-mcp notify poll（默认每 180 秒）      │
-└───────────────────────────────┘ 同一个      │        ▼                                   │
-                                 ControlMaster│ /work 上的共享状态：                        │
- 登录节点上的 agent ── A: stdio ──────────────▶│ <project>/.miyabi-mcp（台账、通知、日志）   │
-                                              └────────────────────────────────────────────┘
+┌────────────────────────────────┐               ┌───────────────────────────────────────────────────┐
+│ Claude Code / Codex            │               │ pi-env daemon（每个连接一个）                     │
+│  MCP miyabi-g (pi-env-mcp) ────┼── B、C ──────▶│ ├─▶ miyabi-mcp serve（B）─▶ qstat / qsub / qdel   │
+│    B：miyabi_pbs__<工具>       │  每个 agent   │ └─▶ bash：miyabi-mcp <cmd>（C）                   │
+│                                │  一条 ssh 会话│                                                   │
+│  notifyd：ssh … notify poll ───┼──────────────▶│ miyabi-mcp notify poll / report（默认每 180 秒）  │
+│  export_command：ssh … ────────┼──────────────▶│ miyabi-mcp ledger --format smooth-research        │
+└────────────────────────────────┘ 同一个        │ /work 上的共享状态：                              │
+                                  ControlMaster  │ <project>/.miyabi-mcp（台账、通知、日志）         │
+ 登录节点上的 agent ── A：stdio ────────────────▶│ miyabi-mcp serve（A）                             │
+                                                 └───────────────────────────────────────────────────┘
 ```
 
 | 方式 | agent 位置 | 启动 | 说明 |
 | --- | --- | --- | --- |
 | A | 登录节点（tmux 或 herdr 中） | `miyabi-mcp serve`（stdio） | notify daemon 也在这台登录节点上 |
-| B | 工作站 | `ssh -T -o BatchMode=yes miyabi-g <path>/bin/miyabi-mcp serve` | 推荐的远端方式，与 pi-env-mcp 共用 ControlMaster |
-| C | 工作站，只接了 pi-env-mcp | 经 pi-env-mcp 的 `bash` 调用 `miyabi-mcp <cmd> --json` | 不需要额外注册，功能相同；通知由工作站上的 notifyd 负责（9.3） |
+| B | 工作站 | pi-env-mcp 在登录节点上托管 `miyabi-mcp serve`（5.3） | 推荐的远端方式。agent 只注册 pi-env-mcp，作业工具是它的 `miyabi_pbs__<工具>`。服务端走 pi-env-mcp 已有的连接，不另开 ssh 会话；不再另外用 `ssh … serve` 注册 |
+| C | 工作站，pi-env-mcp 没有托管 miyabi-mcp | 经 pi-env-mcp 的 `bash` 调用 `miyabi-mcp <cmd>` | 不需要额外注册，功能相同 |
+
+B、C 中，notifyd（9.3）和 `export_command`（11.3）仍在工作站上直接经 ssh 访问登录节点（`ssh -T -o BatchMode=yes <alias> …`，走同一个 ControlMaster）。pi-env-mcp 没有一次性执行命令的子命令；经它的 MCP 接口一次性调用，每次都要重新连接：Miyabi 上实测 2.3–2.5 s，经 ControlMaster 的 ssh 是 0.6 s（11-06，pi-env-mcp 一侧测得）。要让这两项也走 pi-env-mcp，需要在本地常驻一个持有连接的进程，以后再定。
 
 ### 5.2 为什么服务端放在登录节点
 
@@ -183,45 +184,59 @@
 
 - PBS 命令、作业日志、作业内标记和台账都在登录节点可见的共享文件系统上。服务端放在本地，每次读文件和执行命令都要跨 ssh，等于重做一遍 pi-env-mcp。
 - 放在登录节点，一套代码路径就能同时服务 A、B、C 三种方式。
-- 远端的代价可以接受：每个会话一条 ssh 通道，在 ControlMaster 下建立很快；断线后由 MCP 客户端重连（Claude Code 用 `/mcp`）。
+- 远端的代价可以接受：托管时服务端跑在 pi-env-mcp 已有的连接里，一个 agent 一条 ssh 会话，由 bash、终端、文件传输和托管的服务端共用。连接断了，下一次调用时 pi-env-mcp 重新连接，并重新启动服务端。
 - 通知的投递在 agent 所在机器上进行：那里运行一个由 agent 启动的 notifyd（9.3），它经 ssh 向登录节点 poll。
 
 ### 5.3 注册示例
 
-服务名建议用 `miyabi-pbs`，避免与本项目中名为 `miyabi-g` 的 pi-env-mcp 服务混淆。agent 在工作站上时，`serve` 还要加 `--notifier <工作站名> --local-launcher <工作站上的 bin/miyabi-mcp> --remote-alias miyabi-g`，这样返回的通知命令和 `export_command` 可以原样执行（9.3、11.3）。
-
-- `<path>` 是 Miyabi 上本仓库的绝对路径；`<project>` 是 `/work/<group>/<user>/` 下的项目目录名（7.1）。
-- 经 ssh 启动时，服务端无法从工作目录推断项目，所以按项目注册，并写明 `--project`。
+agent 在工作站上（B）时，服务端注册在工作站的 pi-env-mcp 配置里，由 pi-env-mcp 在登录节点上启动；agent 只注册 pi-env-mcp。服务名用 `miyabi-pbs`，工具名就是 `miyabi_pbs__<工具>`：pi-env-mcp 在 Claude Code 里注册为 `miyabi-g` 时，提交工具是 `mcp__miyabi-g__miyabi_pbs__job_submit`。没有 `npm link` 时，下面的 `pi-env-mcp` 换成 `node <pi-env-mcp>/dist/cli.js`。
 
 ```bash
-# Claude Code，agent 在工作站（B）：在本地项目目录中按项目注册
-claude mcp add --scope local miyabi-pbs -- \
-  ssh -T -o BatchMode=yes miyabi-g <path>/miyabi-mcp/bin/miyabi-mcp serve --project <project>
+# 工作站：pi-env-mcp 里已经 add 并 trust 过主机 miyabi-g（见 pi-env-mcp 的 README）
+pi-env-mcp mcp add miyabi-pbs --host miyabi-g -- \
+  <path>/miyabi-mcp/bin/miyabi-mcp serve --project <project> \
+  --notifier <工作站名> --local-launcher <工作站上的 bin/miyabi-mcp> --remote-alias miyabi-g
+pi-env-mcp mcp list      # 在登录节点上启动它，列出状态和工具；有服务起不来时退出码为 1
 
-# Claude Code，agent 在登录节点（A）：写明 --project-dir 最稳妥（服务端工作目录在项目内时也可以省略）
+# agent 只注册 pi-env-mcp（Claude Code）
+claude mcp add --scope user miyabi-g -- pi-env-mcp serve --host miyabi-g
+
+# agent 在登录节点上（A）：直接注册。写明 --project-dir 最稳妥（服务端工作目录在项目内时也可以省略）
 claude mcp add --scope local miyabi-pbs -- \
   <path>/miyabi-mcp/bin/miyabi-mcp serve --project-dir /work/<group>/<user>/<project>
-
-# pi（-l 写入项目的 .pi/mcp.json）
-pi mcp add -l miyabi-pbs -- ssh -T -o BatchMode=yes miyabi-g <path>/miyabi-mcp/bin/miyabi-mcp serve --project <project>
 ```
 
 ```toml
-# Codex（~/.codex/config.toml 是用户级配置：这里写默认项目，其他项目在工具调用中传 project 参数）
-[mcp_servers.miyabi-pbs]
-command = "ssh"
-args = ["-T", "-o", "BatchMode=yes", "miyabi-g", "<path>/miyabi-mcp/bin/miyabi-mcp", "serve", "--project", "<project>"]
-tool_timeout_sec = 120
+# Codex（~/.codex/config.toml）：同样只注册 pi-env-mcp
+[mcp_servers.miyabi-g]
+command = "pi-env-mcp"
+args = ["serve", "--host", "miyabi-g"]
+tool_timeout_sec = 3600   # pi-env-mcp 的 README：bash 默认可以跑 120 s，Codex 默认只等 60 s
 ```
 
-`bin/miyabi-mcp` 是一个 shell 启动器：用 `miyabi-mcp/.venv` 里的 Python 运行服务，不依赖 ssh 非登录 shell 的 PATH；venv 不存在时报错，并给出安装命令（6.1）。
+- `<path>` 是 Miyabi 上本仓库的绝对路径；`<project>` 是 `/work/<group>/<user>/` 下的项目目录名（7.1）。
+- `--project`：pi-env-mcp 启动服务端时，工作目录是主机配置的 cwd，没有配置时是远端 home，服务端从中推断不出项目，所以要写明。一份 pi-env-mcp 配置服务多个项目时可以不写，改在工具调用中传 `project` 参数。
+- `--notifier`、`--local-launcher`、`--remote-alias` 让返回的通知命令和 `export_command` 在工作站上可以原样执行（9.3、11.3）。`--remote-alias` 有两个用处：它是 pi-env-mcp 里登录节点的主机名，interactive_plan 返回的 `terminal_open.host` 用它；它也是工作站 `~/.ssh/config` 里的 ssh 别名，notifyd 和 `export_command` 用它。所以两者要同名，这里都是 `miyabi-g`。
+- 超时：pi-env-mcp 对托管服务端的每个请求默认等 60 s，收到 progress 时重新计时。job_wait 默认最多 45 s，等待时发 progress。job_submit 的提交、job_get 查历史和 job_cancel 都不发 progress；PBS 命令各有 30–60 s 的超时，提交时还要等锁，最坏情况会超过 60 s。超时后 pi-env-mcp 会取消服务端的这次调用，而提交可能已经完成（5.4）。所以在 pi-env-mcp 的配置里给这一项加 `"timeout": 300`（`mcp add` 没有对应的参数）。
+- 不要给这一项设 `--description`：pi-env-mcp 会用它整个替换服务端的 instructions。
+
+`bin/miyabi-mcp` 是一个 shell 启动器：用 `miyabi-mcp/.venv` 里的 Python 运行服务，不依赖远端 shell 的 PATH；venv 不存在时报错，并给出安装命令（6.1）。
 
 ### 5.4 连接与登录节点的注意事项
 
-- **BatchMode。** 主连接（ControlMaster）不在时服务起不来，用户要先 `ssh -fN miyabi-g`（与 pi-env-mcp 的 shareConnection 相同）。ControlPersist（这里是 8 h）是从最后一个会话断开时开始计时的。
-- **一条主连接最多同时 10 个会话。** 11-06 实测：主连接上已有 1 个会话时，再同时开 11 个，前 9 个成功，后 2 个被拒，ssh 报 `Session open refused by peer`（sshd 的 MaxSessions，默认值就是 10；Miyabi 的 sshd_config 普通用户读不到）。测试时把 ssh 的直连回退指向 127.0.0.1:9，没有对 Miyabi 发起登录。每个经 ssh 连到 Miyabi 的 MCP 客户端（miyabi-mcp serve、pi-env-mcp）运行期间都占一个；notifyd 的每次 poll、report 和 ensure 时的目标检查，以及 `export_command`，各占一个，但很快释放。
+- **主连接与 BatchMode。** pi-env-mcp 的 shareConnection 主机、notifyd 和 `export_command` 都经工作站到 miyabi-g 的主连接（ControlMaster）登录。主连接不在时，pi-env-mcp 报 `no shared ssh connection`，ssh 在 BatchMode 下登录不了；用户要先 `ssh -fN miyabi-g`。ControlPersist（这里是 8 h）是从最后一个会话断开时开始计时的。
+- **一条主连接最多同时 10 个会话。** 11-06 实测：主连接上已有 1 个会话时，再同时开 11 个，前 9 个成功，后 2 个被拒，ssh 报 `Session open refused by peer`（sshd 的 MaxSessions，默认值就是 10；Miyabi 的 sshd_config 普通用户读不到）。测试时把 ssh 的直连回退指向 127.0.0.1:9，没有对 Miyabi 发起登录。每个 pi-env-mcp serve（一个 agent 一个；它托管的服务端不另占）运行期间都占一个；notifyd 的每次 poll、report 和 ensure 时的目标检查，以及 `export_command`，各占一个，但很快释放。
   - 会话被拒后，ssh 会改为直接连接，而 BatchMode 下直接连接登录不了，所以错误的结尾是 `Permission denied (publickey)`，看起来像认证问题。11-06 联合测试 B 轮，两个协调者和各角色共开了约 8 个 MCP 会话，再加上 notifyd 和只读检查，`notifyd ensure` 的目标检查就因此失败了。
-  - notifyd 遇到被拒的会话时，若远端什么都没有执行（stdout 为空），隔 2 s、5 s 各重试一次；仍被拒时报 `ssh_sessions_full`，写明原因，并请用户关掉不再用的 MCP 客户端。此时"通道中断"的消息不再建议重开主连接，因为主连接还在，只是满了。
+  - notifyd 遇到被拒的会话时，若远端什么都没有执行（stdout 为空），隔 2 s、5 s 各重试一次；仍被拒时报 `ssh_sessions_full`，写明原因，并请用户关掉不再用的 MCP 客户端。此时"通道中断"的消息不再建议重开主连接，因为主连接还在，只是满了。pi-env-mcp 从 8ba80d0 起也这样提示。
+- **pi-env-mcp 托管（B）。** pi-env-mcp（476e15d 起）对托管的服务端有下面这些约束，miyabi-mcp 的对应做法分别如下。11-06 用假 PBS 在 miyabi-g1 上经 pi-env-mcp 实测过：没有真的 qsub，`job_wait_max_s` 临时调到 100，这一项不设 `timeout`。
+  - 只把 instructions 的前 2000 个字符给 agent：INSTRUCTIONS 控制在 2000 以内（现在 1784），由测试检查。
+  - 每个请求默认 60 s 超时，收到服务端的 progress 时重新计时。实测带 progressToken 的 job_wait 跑满 90 s，每 10 s 一条 progress；同时发出、不带 token 的那个在 60.0 s 报 `MCP request timed out after 60000ms`，因为当时 pi-env-mcp 只在 agent 要了 progress 时才向服务端要。pi-env-mcp 6aab119 改为总向服务端要 progress，只在 agent 要了时才往上转发（上游 pi 也是这样）。job_wait 默认最多 45 s，本来就碰不到这个上限；其他工具不发 progress，所以这一项要设 `"timeout": 300`（5.3）。
+  - 超时后 pi-env-mcp 给服务端发 `notifications/cancelled`。miyabi-mcp 收到取消时，job_wait 随即结束；其他工具在后台线程里照常做完，只是结果不再返回。所以超时或被取消的 job_submit 提交可能已经提交了：带同一个 `request_key` 重试会拿回那个作业；没带 `request_key` 时先用 job_list 或 job_get 确认，不要直接再提交一次。
+  - 取消要转发到服务端：实测取消正在进行的 job_wait 后，服务端 0.08 s 内就回答了下一个调用，被取消的那次 wait 不再轮询，也没有收到响应（符合 MCP 的规定）。
+  - agent 退出时，pi-env-mcp 先关服务端的 stdin，2 s 后再 kill：job_wait 在 stdin 关闭或调用被取消后 0.1 s 内结束（69f2f5a 之前要拖到 8.6 s）。实测 job_wait 进行中关掉 pi-env-mcp 的 stdin，它 0.11 s 后退出，登录节点上没有留下进程。
+  - 服务端退出时，它的进程组会被一并杀掉：miyabi-mcp serve 不启动需要比它活得久的进程。notifyd 在工作站上；`qsub -I` 在 agent 的终端里。
+  - 不转发 resources、prompts，也不转发服务端发起的请求（sampling、elicitation）：miyabi-mcp 只用工具和 progress。
+  - agent 看不到 `serverInfo.version`：`pbs_context.server.commit` 写出运行中的提交，checkout 前进后结果里带 `server_note`。重启托管的服务端，要么在 pi-env-mcp 的 `hosts` 里对该主机 `reconnect: true`，要么重启 agent 的 pi-env-mcp。前者会关掉这台主机上的终端，包括交互作业所在的终端。
 - **多台登录节点。** 目前至少有 g1、g2、g3。同一主连接里的会话落在同一台，不同主连接可能落在另一台。台账、通知和轮询快照都在共享文件系统上；进程是否存活靠心跳文件判断，不靠 pid。
 - **一个项目用一台登录节点。** 建议同一个项目的 MCP 服务、notifyd 和命令行调用都在同一台登录节点上。这只是使用建议，不是正确性的前提：锁在登录节点之间一致（7.6），观测的先后按查询开始的时间判断（7.3），各节点的时钟由 NTP 同步。几台登录节点同时使用同一个项目没有实测。
 - **PATH。** 服务端用绝对路径调用 PBS 命令（`/usr/local/bin/qstat`、`/opt/pbs/bin/qsub` 等，可配置），不依赖 ssh 非登录 shell 的 PATH。
@@ -286,7 +301,7 @@ miyabi-mcp/
   2. 启动参数 `serve --project-dir <path>`，或 `--project <name>`（展开为 `/work/<group>/<user>/<name>`）；
   3. 环境变量 `MIYABI_MCP_PROJECT_DIR`；
   4. 按服务端的工作目录推断（方式 A：agent 在登录节点的项目目录里启动服务）。工作目录在 git 仓库或 worktree 内时，取主仓库所在目录（7.7）；否则，位于 `/work/<group>/<user>/<name>/…` 之下时取该 `<name>` 目录。
-- 经 ssh 启动时（方式 B），服务端的工作目录是远端 home，无法推断，所以注册时要写明 `--project`（5.3）。
+- 由 pi-env-mcp 托管时（方式 B），服务端的工作目录是 pi-env-mcp 主机配置的 cwd，没有配置时是远端 home，一般推断不出项目，所以注册时写明 `--project`，或在工具调用中传 `project`（5.3）。
 - `<group>` 取启动参数 `--group` 或环境变量 `MIYABI_MCP_GROUP`；都没有时，取用户唯一可用的 PBS 项目组（`--limit`），有多个就报错并要求指定。`<user>` 是登录用户名。
 - 项目目录必须已经存在（作业要用的代码本来就在那里），否则写操作报错，不会自动创建。
 - 没有解析出项目时，只读查询照常可用（PBS 是事实来源）；提交、取消和通知报 `no_project`。
@@ -777,7 +792,7 @@ open ─封口─▶ sealed ─条件满足或超时─▶ fired ─投递─▶
 | agent 位置 | Claude Code | Codex | pi 或其他 TUI agent |
 | --- | --- | --- | --- |
 | 登录节点 | 提交时带 notify，后台运行 `listen_command` | `deliver=codex_queue`，运行 `start_command` | `deliver=herdr` 或 `tmux` |
-| 工作站（MCP 经 ssh） | 同上，daemon 在工作站上经 ssh poll | 同上 | 同上 |
+| 工作站（MCP 由 pi-env-mcp 托管） | 同上，daemon 在工作站上经 ssh poll | 同上 | 同上 |
 | 编排者通知 worker | `deliver={"method": "herdr", "agent": "<worker>"}`；会话内 subagent 由编排者收到通知后用 SendMessage 转达 | | |
 
 **一个通知一个接收方**（11-05 定，D5）。通知归提交作业的 agent：结果出来后要接着干活的是它。协调者用 `notify_list`、`job_get` 看状态，不开 listener。双方都要被唤醒时，为同一组作业建两个通知（不同 `name`，各自的投递方式），不共用一个收件目录：listener 收件目录先到先得，两个人一起听，总有一个以退出码 3 结束。
@@ -831,14 +846,16 @@ open ─封口─▶ sealed ─条件满足或超时─▶ fired ─投递─▶
 ### 10.2 权限提示与工具注解
 
 - 工具都带 MCP 注解：查询类为 `readOnlyHint`；`job_cancel` 为 `destructiveHint`；`job_submit` 不是 destructive，但会消耗预算。客户端可以据此决定是否询问用户。
-- Claude Code 的示例配置：查询类直接放行，提交和取消要求确认。
+- 托管时，pi-env-mcp 把工具的描述、schema 和注解原样转给 agent（见它的 README）。
+- Claude Code 的示例配置：查询类直接放行，提交和取消要求确认。工具名按 B 的注册（pi-env-mcp 注册为 `miyabi-g`，服务名 `miyabi-pbs`，5.3）；A 直接注册时把前缀 `mcp__miyabi-g__miyabi_pbs__` 换成 `mcp__miyabi-pbs__`。
 
 ```json
 {"permissions": {
-  "allow": ["mcp__miyabi-pbs__pbs_context", "mcp__miyabi-pbs__pbs_queues", "mcp__miyabi-pbs__job_list",
-            "mcp__miyabi-pbs__job_get", "mcp__miyabi-pbs__job_wait", "mcp__miyabi-pbs__notify_list",
-            "mcp__miyabi-pbs__ledger_query"],
-  "ask": ["mcp__miyabi-pbs__job_submit", "mcp__miyabi-pbs__job_cancel"]}}
+  "allow": ["mcp__miyabi-g__miyabi_pbs__pbs_context", "mcp__miyabi-g__miyabi_pbs__pbs_queues",
+            "mcp__miyabi-g__miyabi_pbs__job_list", "mcp__miyabi-g__miyabi_pbs__job_get",
+            "mcp__miyabi-g__miyabi_pbs__job_wait", "mcp__miyabi-g__miyabi_pbs__notify_list",
+            "mcp__miyabi-g__miyabi_pbs__ledger_query"],
+  "ask": ["mcp__miyabi-g__miyabi_pbs__job_submit", "mcp__miyabi-g__miyabi_pbs__job_cancel"]}}
 ```
 
 ### 10.3 其他护栏
