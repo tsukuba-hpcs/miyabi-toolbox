@@ -109,6 +109,7 @@ def refresh(store: Store, records: list[dict], snap: dict) -> list[dict]:
     active = {job_num(row["job_id"]): row for row in snap["jobs"]}
     detail_ids: list[str] = []
     history_ids: list[str] = []
+    young: set[str] = set()  # submitted within the grace period: maybe not listed yet, maybe already over
     for record in records:
         job_id = record.get("job_id")
         state = record.get("state") or {}
@@ -126,8 +127,11 @@ def refresh(store: Store, records: list[dict], snap: dict) -> list[dict]:
             # Only a table read that started after qsub returned is evidence that the job left it.
             if submit.get("accepted_ts") and float(snap.get("observed_ts", 0)) <= submit["accepted_ts"]:
                 continue
+            # History is read for a job just submitted too: a short job is over within seconds, and skipping it
+            # left job_wait showing it queued until the grace ran out (11-06 joint test). In the grace only a
+            # finished record counts, and not finding the job does not start its missing clock.
             if grace and within(submit.get("submitted_at"), grace):
-                continue
+                young.add(job_id)
             history_ids.append(job_id)
     events: list[dict] = []
     # Each observation is dated by the start of its query, so that a concurrent refresh that queried later and
@@ -152,6 +156,8 @@ def refresh(store: Store, records: list[dict], snap: dict) -> list[dict]:
         absent_since = min(float(snap.get("observed_ts") or queried), queried)
         for job_id in history_ids:
             fields = _match(details, job_id)
+            if job_id in young and (fields is None or not states.finished(fields)):
+                continue
             record = store.find(job_id) or {}
             if fields is not None:
                 observation = states.from_detail(fields, history=True,

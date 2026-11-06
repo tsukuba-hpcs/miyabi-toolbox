@@ -407,6 +407,9 @@ miyabi-mcp/
 - **事件写入后不再修改。** 后来发现判断有误（例如 Exit_status 的映射）时，追加一条 `reconciled` 事件。
 - **数值在生成事件时定稿。** `node_hours`、`mig_instance_hours` 保留 6 位小数（例如 617 s × 1 节点 → 0.171389），写入事件。导出、台账和通知消息都用这个存下的值，不重新计算。
 - **已结束的作业不再轮询**，所以结束之后不会再产生 `unknown`，只会有带证据的 `reconciled` 更正。
+- **刚提交的作业。** 提交后 `submit_grace_s`（默认 120 s）内，作业不在活动表时同样查历史，但只有 `job_state` 为 F（数组子作业为 X）的记录才记为 `ended`；两处都查不到时不开始计 missing（7.4 的 unknown），因为它也可能只是还没列进表里。
+  - 11-06 联合测试 B 轮之前，这段时间里根本不查历史：几秒就结束的作业在 `job_wait` 里一直是 queued，`met` 为 false，要等宽限期过去才记为结束，而 `job_wait` 一次最多等 45 s。有回归测试。
+  - Miyabi 实测（11-06，各项目台账里 480 个已结束的作业）：作业离开活动表后查历史都查到了，最早在 obittime 后 2 s；没有出现过 missing 或 unknown。结束的记录 `job_state = F`，排队时被删除、没有开始时间的也一样。
 - **较旧的观测不覆盖较新的。** 每个观测按其 PBS 查询开始的时间计（`state.observed_ts`）。查询开始得比已记录状态的那次查询更早的观测，直接丢弃。两次刷新同时进行时（例如 agent 的调用和 notifyd），先查询的可能后写入，照写会让状态倒退（running → held），并记下没有发生过的变化（11-05 审查时发现，有回归测试）。
   - `submitted` 只由 qsub 的接受担保，按接受的时间计；`unknown` 还依赖更早的查询（活动表读取，可能还有 `qstat -f`），按其中最早的那次计。所以别的进程先记下了更晚的状态时，作业的第一个事件不是 `submitted`。
   - 剩下的窗口：两次查询在时间上重叠时，PBS 回答的先后不一定与开始的先后一致；正好在这段时间里（通常不到一秒）发生的状态变化仍可能按错误的顺序记下，下一次刷新会纠正。登录节点之间比较的是各自的时钟，NTP 的偏差在毫秒级，影响与此相同。
@@ -679,7 +682,7 @@ Miyabi 登录节点（miyabi-mcp）                         agent 所在机器�
 - **投递在 agent 所在机器。** daemon 在本机投递，再把结果报告回去。
 - **daemon 由 agent 启动。** 每次登记或加入通知后，agent 都运行返回的命令：`start_command`（`notifyd ensure`），或 listener 的 `listen_command`（它也会 ensure）。ensure 只看本机的状态文件和 pid，已在运行就直接返回，否则在后台启动，所以 agent 不以服务端报告的"在运行"为由跳过（11-05 定，D3）。没有未完成的通知时，daemon 再 poll 两次后报告退出并自行退出，不留常驻进程（9.3）。
 - **每台机器、每个用户一个 daemon。** 它的名字（notifier）默认是本机短主机名，服务端按名字分派通知。名字只能用字母、数字和 `_ . -`（不超过 64 个字符，首字符为字母或数字），因为它是两端的文件名，也出现在返回的命令里；返回的命令按 shell 规则加引号。在登录节点上 daemon 直接调用 miyabi-mcp；在工作站上经 `ssh -o BatchMode=yes <alias> <launcher> notify poll …`，复用 ControlMaster。
-- **频率。** 用户级 `config.json` 的 `notify_poll_seconds`（默认 180 s）是唯一来源：服务端把它写进返回的 `start_command` 和 `listen_command`（`--poll-seconds`），daemon 在心跳里报告实际间隔，与配置不一致时 `daemon_info` 标出来。已在运行的 daemon 保持原间隔，直到退出或 `notifyd stop`；ensure 不假装已经换了配置。间隔再短也意义有限：共享 qstat 快照最长用 60 s 前的（`poll_max_age_s`），作业提交后 120 s 内不查历史，poll 失败时还会退避。不按 walltime 自适应：walltime 只是上限，作业提前结束或失败时更需要及时报告。11-05 先定为 60 s（D4），此前是 300 s，实测检测延迟中位 192 s；同日改为 180 s，减少 qstat 调用。
+- **频率。** 用户级 `config.json` 的 `notify_poll_seconds`（默认 180 s）是唯一来源：服务端把它写进返回的 `start_command` 和 `listen_command`（`--poll-seconds`），daemon 在心跳里报告实际间隔，与配置不一致时 `daemon_info` 标出来。已在运行的 daemon 保持原间隔，直到退出或 `notifyd stop`；ensure 不假装已经换了配置。间隔再短也意义有限：共享 qstat 快照最长用 60 s 前的（`poll_max_age_s`），poll 失败时还会退避。不按 walltime 自适应：walltime 只是上限，作业提前结束或失败时更需要及时报告。11-05 先定为 60 s（D4），此前是 300 s，实测检测延迟中位 192 s；同日改为 180 s，减少 qstat 调用。
 
 ### 9.2 通知与作业组
 

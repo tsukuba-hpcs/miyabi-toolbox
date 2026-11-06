@@ -896,6 +896,49 @@ class ObservationOrderTests(FakePbsCase):
         self.assertEqual(self.kinds(), ["running"])
 
 
+class SubmitGraceTests(FakePbsCase):
+    """The first submit_grace_s after qsub: a job not in the table may be over already, or not listed yet."""
+
+    user_config = {**FakePbsCase.user_config, "submit_grace_s": 120}
+
+    def state(self) -> dict:
+        record = self.ok_call("ledger_query", {"refresh": False})["records"][0]
+        return {"execution_state": record["state"]["execution_state"], "missing": "missing_since" in record}
+
+    def test_job_wait_sees_a_short_job_end_at_once(self):
+        job_id = self.submit(name="short")["job_id"]
+        self.start(job_id)
+        self.finish(job_id, exit_status=1)
+        result = self.ok_call("job_wait", {"job_ids": [job_id], "timeout_s": 5})  # until 11-06: queued, met false
+        self.assertTrue(result["met"], result)
+        self.assertEqual((result["jobs"][0]["execution_state"], result["jobs"][0]["outcome"]), ("ended", "failed"))
+        self.assertLess(result["waited_s"], 5)
+
+    def test_a_job_found_nowhere_is_not_counted_missing_yet(self):
+        job_id = self.submit(name="x")["job_id"]
+        state = self.read_state()
+        state["jobs"].pop(job_id.split(".")[0])
+        self.write_state(state)
+        self.ok_call("job_list")  # missing_s=0: past the grace this would be unknown at once
+        self.assertEqual(self.state(), {"execution_state": "queued", "missing": False})
+
+    def test_only_a_finished_history_record_ends_a_job(self):
+        job_id = self.submit(name="x")["job_id"]
+        state = self.read_state()
+        job = state["jobs"].pop(job_id.split(".")[0])
+        self.write_state(state)
+        real = Pbs.detail
+
+        def detail(pbs, ids, history=False):  # a history record that does not say the job is over
+            if history:
+                return {job_id: {"job_state": "R", "stime": "Fri Nov  6 14:30:21 2026", "queue": job["queue"]}}
+            return real(pbs, ids, history=history)
+
+        with mock.patch.object(Pbs, "detail", detail):
+            self.ok_call("job_list")
+        self.assertEqual(self.state(), {"execution_state": "queued", "missing": False})
+
+
 class LockTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()

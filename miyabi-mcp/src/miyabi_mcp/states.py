@@ -68,11 +68,16 @@ def placement(fields: dict[str, str]) -> dict[str, str] | None:
     return found or None
 
 
+def finished(fields: dict[str, str]) -> bool:
+    """The record says the job is over (`job_state` F, or X for an array subjob)."""
+    return (fields.get("job_state") or "").strip() in {"F", "X"}
+
+
 def from_detail(fields: dict[str, str], *, history: bool, cancel_requested: bool,
                 mig_hardware: str | None = None) -> dict[str, Any]:
     """One `qstat [-H] -f` record -> an observation (without event bookkeeping)."""
     job_state = (fields.get("job_state") or "").strip()
-    if history or job_state in {"F", "X"}:
+    if history or finished(fields):
         started = bool((fields.get("stime") or "").strip())
         status = exit_status(fields)
         if not started:
