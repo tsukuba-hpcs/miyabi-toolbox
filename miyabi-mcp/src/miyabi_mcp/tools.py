@@ -98,7 +98,9 @@ TOOLS = [
          "queue shape (MIG queues take 1, 2 or 4 instances per AVAIL_MIG), select resources, walltime, the scheduled "
          "stop, group, limits, the project policy and budget, and returns the plan with a plan_digest that also "
          "covers notify. Call again with the same arguments, dry_run=false and that plan_digest to run qsub. "
-         "request_key makes retries safe; client_ref is exported as the attempt id. Jobs get MIYABI_SUBMIT_ID, "
+         "request_key makes retries safe. A commit that timed out or was cancelled may still have submitted: repeat "
+         "it with the same request_key, which returns that job, or check job_list before planning again. client_ref "
+         "is exported as the attempt id. Jobs get MIYABI_SUBMIT_ID, "
          "MIYABI_CLIENT_REF, MIYABI_PROJECT_DIR and MIYABI_JOB_RECORD; output defaults to <project>/.miyabi-mcp/logs/. "
          "For an interactive compute shell use interactive_plan instead.",
          schema({"script": {**STR, "description": "Absolute path of the job script."},

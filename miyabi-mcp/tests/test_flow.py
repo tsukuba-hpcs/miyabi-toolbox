@@ -193,19 +193,30 @@ class SubmitCheckTests(FakePbsCase):
         self.assertEqual(self.check(self.plan(queue="debug-mig", select="2"), "select.resources")["status"], "pass")
         self.assertEqual(self.check(self.plan(), "select.resources")["status"], "pass")
 
-    def test_placeholders_name_the_line_and_skip_redirections(self):
+    def test_placeholders_name_the_line_and_skip_redirections_and_remarks(self):
+        # 11-06 joint test: a remark naming runs/<attempt>/ failed the plan, and allow_placeholders, the only
+        # way past it, switched the check off for the whole script.
         text = (WITH_CD + "python x.py <config.yaml >train.log\ncat <<EOF >notes.txt\nnote\nEOF\n"
-                "sort <in.txt >out.txt\n")
+                "sort <in.txt >out.txt\n# run <label> <sha> <pytest target>\n  # writes runs/<attempt>/manifest.json\n")
         clean = self.plan(script=None, script_text=text)
         self.assertTrue(clean["valid"], clean["checks"])
         self.assertNotIn("script.placeholders", {check["id"] for check in clean["checks"]})
-        commented = text + "# run <label> <sha> <pytest target>\n"
-        flagged = self.check(self.plan(script=None, script_text=commented), "script.placeholders")
+        unfilled = text + 'python run.py --label "<label>" --sha "<sha>"  # <attempt>\n'
+        flagged = self.check(self.plan(script=None, script_text=unfilled), "script.placeholders")
         self.assertEqual(flagged["status"], "fail")
-        self.assertIn("line 9: <label>; line 9: <sha>.", flagged["detail"])
-        allowed = self.plan(script=None, script_text=commented, allow_placeholders=True)
+        self.assertIn("line 11: <label>; line 11: <sha>; line 11: <attempt>.", flagged["detail"])
+        allowed = self.plan(script=None, script_text=unfilled, allow_placeholders=True)
         self.assertTrue(allowed["valid"])
         self.assertEqual(self.check(allowed, "script.placeholders")["status"], "warn")
+
+    def test_placeholders_in_pbs_directives_and_the_interpreter_line_still_fail(self):
+        cases = (("#!/usr/bin/env <python>\n" + WITH_CD.split("\n", 1)[1], "line 1: <python>"),
+                 (WITH_CD.replace("#PBS -j oe", "#PBS -N <name>"), "line 2: <name>"),
+                 (WITH_CD.replace("#PBS -j oe", "  #PBS -W group_list=<group>"), "line 2: <group>"))
+        for text, where in cases:
+            flagged = self.check(self.plan(script=None, script_text=text), "script.placeholders")
+            self.assertEqual(flagged["status"], "fail", text)
+            self.assertIn(where, flagged["detail"])
 
     def test_scripts_without_cd_get_a_warning(self):
         warned = self.check(self.plan(), "script.cwd")

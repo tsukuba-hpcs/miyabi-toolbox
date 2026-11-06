@@ -231,7 +231,7 @@ tool_timeout_sec = 3600   # pi-env-mcp 的 README：bash 默认可以跑 120 s�
 - **pi-env-mcp 托管（B）。** pi-env-mcp（476e15d 起）对托管的服务端有下面这些约束，miyabi-mcp 的对应做法分别如下。11-06 用假 PBS 在 miyabi-g1 上经 pi-env-mcp 实测过：没有真的 qsub，`job_wait_max_s` 临时调到 100，这一项不设 `timeout`。
   - 只把 instructions 的前 2000 个字符给 agent：INSTRUCTIONS 控制在 2000 以内（现在 1784），由测试检查。
   - 每个请求默认 60 s 超时，收到服务端的 progress 时重新计时。实测带 progressToken 的 job_wait 跑满 90 s，每 10 s 一条 progress；同时发出、不带 token 的那个在 60.0 s 报 `MCP request timed out after 60000ms`，因为当时 pi-env-mcp 只在 agent 要了 progress 时才向服务端要。pi-env-mcp 6aab119 改为总向服务端要 progress，只在 agent 要了时才往上转发（上游 pi 也是这样）。job_wait 默认最多 45 s，本来就碰不到这个上限；其他工具不发 progress，所以这一项要设 `"timeout": 300`（5.3）。
-  - 超时后 pi-env-mcp 给服务端发 `notifications/cancelled`。miyabi-mcp 收到取消时，job_wait 随即结束；其他工具在后台线程里照常做完，只是结果不再返回。所以超时或被取消的 job_submit 提交可能已经提交了：带同一个 `request_key` 重试会拿回那个作业；没带 `request_key` 时先用 job_list 或 job_get 确认，不要直接再提交一次。
+  - 超时后 pi-env-mcp 给服务端发 `notifications/cancelled`。miyabi-mcp 收到取消时，job_wait 随即结束；其他工具在后台线程里照常做完，只是结果不再返回。所以超时或被取消的 job_submit 提交可能已经提交了：带同一个 `request_key` 重试会拿回那个作业；没带 `request_key` 时先用 job_list 或 job_get 确认，不要直接再提交一次。job_submit 的工具说明也这样提醒 agent。
   - 取消要转发到服务端：实测取消正在进行的 job_wait 后，服务端 0.08 s 内就回答了下一个调用，被取消的那次 wait 不再轮询，也没有收到响应（符合 MCP 的规定）。
   - agent 退出时，pi-env-mcp 先关服务端的 stdin，2 s 后再 kill：job_wait 在 stdin 关闭或调用被取消后 0.1 s 内结束（69f2f5a 之前要拖到 8.6 s）。实测 job_wait 进行中关掉 pi-env-mcp 的 stdin，它 0.11 s 后退出，登录节点上没有留下进程。
   - 服务端退出时，它的进程组会被一并杀掉：miyabi-mcp serve 不启动需要比它活得久的进程。notifyd 在工作站上；`qsub -I` 在 agent 的终端里。
@@ -581,7 +581,7 @@ miyabi-mcp/
 - **项目组**：在用户的组中，且列在该队列的 PROJECT 里；未指定时，只有在唯一一个候选组时才自动选取。
 - **上限**：`--limit` 的 accepted 和 running 还有余量，并扣除保留槽位；按标签的并发；策略中的每作业上限、时间窗预算和项目总额 `budget`（10.1）。
 - **通知**（`notify`）：规范化后（补上默认值）放进计划和 `plan_digest`，所以同一个摘要下不能再换通知的目标、投递方式或分组；分组的当前状态（是否已封口）在 commit 时复核。
-- **脚本**：文件存在；`bash -n` 通过；没有残留的 `<...>` 占位符（尖括号内不含空格，所以 `python x.py <config.yaml >train.log`、`cat <<EOF >notes.txt` 这类重定向不算；注释照常检查，因为 `#PBS` 在 shell 看来也是注释；失败时报出行号和匹配到的文字，`allow_placeholders` 整体放行）；解析 `#PBS` 指令，报告被命令行覆盖的指令（命令行优先；只列命令行实际给出的选项：`-q`、`-N`、`-l select`、`-l walltime`、`-W group_list`，批处理另有 `-o`、`-j`，带 `depend` 时还有 `-W depend`；值与命令行相同的不报，报出的写明两边的值。11-06 之前只比较选项名，脚本里写着与项目相同的 `group_list` 也每次报警）；脚本在 `/tmp` 或节点本地路径下时报警。
+- **脚本**：文件存在；`bash -n` 通过；没有残留的 `<...>` 占位符（尖括号内不含空格，所以 `python x.py <config.yaml >train.log`、`cat <<EOF >notes.txt` 这类重定向不算；整行注释不检查，但 `#PBS` 指令行和首行的 `#!` 照常检查（行首空白不计，与指令的识别一致），行尾注释也照常检查；失败时报出行号和匹配到的文字，`allow_placeholders` 整体放行。11-06 之前所有注释都检查：联合测试 B' 里一句注释写了 `<attempt>`，计划被拦下，研究员只好用 `allow_placeholders` 关掉整份脚本的检查）；解析 `#PBS` 指令，报告被命令行覆盖的指令（命令行优先；只列命令行实际给出的选项：`-q`、`-N`、`-l select`、`-l walltime`、`-W group_list`，批处理另有 `-o`、`-j`，带 `depend` 时还有 `-W depend`；值与命令行相同的不报，报出的写明两边的值。11-06 之前只比较选项名，脚本里写着与项目相同的 `group_list` 也每次报警）；脚本在 `/tmp` 或节点本地路径下时报警。
 - **数组作业**：暂不支持。`array` 参数或脚本中的 `#PBS -J` 都使计划失败：计划、时间窗、`budget` 和预留只会按一个子作业计算（`array="1-100"` 时少算 99 倍），用量、取消和通知也没有按子作业处理（11-05 审查）。需要多个成员时分别提交，用带 `expected` 的通知分组等待全部结束。
 - **工作目录**（`script.cwd`）：批处理作业从 `$HOME` 开始，`workdir` 只决定 `$PBS_O_WORKDIR`。脚本里（注释之外）没有 `cd` 或 `pushd` 时给 warn，附上示例 `cd -- "${PBS_O_WORKDIR:?}" || exit 1`（放在 `#PBS` 指令之后）。不自动往脚本里插 cd：插的位置不对会让后面的 `#PBS` 指令失效，提交的字节也不再是用户看过的脚本；也不做"cd 之前是否用了相对路径"的静态分析。
 - **工作目录与输出路径**：

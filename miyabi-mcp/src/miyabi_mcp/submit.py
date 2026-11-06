@@ -93,8 +93,18 @@ def check_select(select: str, checks: Checks) -> None:
 
 
 def _placeholders(text: str) -> list[str]:
-    return [f"line {number}: {match}" for number, line in enumerate(text.splitlines(), 1)
-            for match in PLACEHOLDER.findall(line)]
+    """`<name>` placeholders left in the script, by line. Whole-line comments are skipped, apart from #PBS
+    directives and the #! line, which are read as more than comments. Until 11-06 every comment was checked:
+    a `<attempt>` in a remark failed a plan, and the only way past it, allow_placeholders, switched the check
+    off for the whole script."""
+    found = []
+    for number, line in enumerate(text.splitlines(), 1):
+        stripped = line.lstrip()
+        read = stripped.startswith("#PBS") or (number == 1 and stripped.startswith("#!"))
+        if stripped.startswith("#") and not read:
+            continue
+        found += [f"line {number}: {match}" for match in PLACEHOLDER.findall(line)]
+    return found
 
 
 def _changes_directory(text: str) -> bool:
@@ -252,8 +262,9 @@ def build_plan(settings: Settings, store: Store, args: dict, policy: dict) -> tu
     placeholders = _placeholders(text)
     shown = "; ".join(placeholders[:10]) + (f"; and {len(placeholders) - 10} more" if len(placeholders) > 10 else "")
     if placeholders and not args.get("allow_placeholders"):
-        checks.add("script.placeholders", "fail", f"unfilled placeholders: {shown}. Fill them in, reword a comment "
-                   "that only looks like one, or pass allow_placeholders=true when the text is meant literally")
+        checks.add("script.placeholders", "fail", f"unfilled placeholders: {shown}. Fill them in; move a remark "
+                   "that only looks like one onto a comment line of its own (those are not checked, apart from "
+                   "#PBS and #! lines); or pass allow_placeholders=true when the text is meant literally")
     elif placeholders:
         checks.add("script.placeholders", "warn", "allowed by caller: " + shown)
     found = directive_keys(directives(text))

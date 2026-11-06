@@ -64,7 +64,7 @@ tool_timeout_sec = 3600   # as pi-env-mcp's README advises: Codex waits 60 s by 
   allows a hosted server 60 s per request, counted again from each progress report. job_wait reports progress
   and stops at 45 s by default, but a submit (lock, qsub, first look) reports none. A call that times out is
   cancelled on the server, yet a submit may already have gone through: retry it with the same `request_key`,
-  which returns that job, or check `job_list` before submitting again.
+  which returns that job, or check `job_list` before submitting again (job_submit's description says so).
 - Do not set `--description` for it: pi-env-mcp shows that instead of the server's instructions.
 
 notifyd and `export_command` still reach the login node with plain `ssh -T -o BatchMode=yes <alias>`, through
@@ -170,9 +170,10 @@ cd -- "${PBS_O_WORKDIR:?}" || exit 1
 Among the dry-run checks:
 
 - `script.cwd` warns when the script never runs `cd` or `pushd`.
-- `script.placeholders` fails on a `<name>` without spaces anywhere in the script, comments included (a
-  `#PBS` line is a comment to the shell), and gives line numbers. Redirections such as `<in.txt >out.txt` do
-  not match. Fill the placeholder in, reword the comment, or pass `allow_placeholders=true` (it then warns).
+- `script.placeholders` fails on a `<name>` without spaces in the script and gives line numbers. Whole-line
+  comments are skipped, except `#PBS` directives and the `#!` line; a comment at the end of a command line is
+  checked. Redirections such as `<in.txt >out.txt` do not match. Fill the placeholder in, move a remark onto
+  a comment line of its own, or pass `allow_placeholders=true` (it then warns).
 - `queue.shape` checks `select`: it counts nodes on G and C queues and MIG instances on MIG queues, which
   accept 1, 2 or 4 instances. `select.resources` fails on `vnode`, which qsub rejects, and warns on chunk
   resources other than `mpiprocs`, `ompthreads` and `mem`.
