@@ -1,0 +1,1192 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>miyabi-mcp 设计说明：服务跑在 PBS 旁边</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='8' fill='%230d1520'/%3E%3Cpath d='M13 20h38v24H13zM26 20v24M38 20v24' fill='none' stroke='%23ffb547' stroke-width='4'/%3E%3C/svg%3E">
+<!-- Blueprint register (visual-explainer style guide): IBM Plex, blue-black, 24px grid stage. CJK falls back to Noto Sans SC. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  /* tokens: Blueprint register, dark first */
+  :root {
+    color-scheme: light dark;
+    --bg: #0d1520; --surface: #132031; --border: #22324a; --border-bright: #596b87;
+    --text: #e3ecf5; --text-dim: #92a6bb; --accent: #ffb547; --accent-dim: rgba(255,181,71,.14);
+    --ok: #6fd3a0; --warn: #e8d36a; --risk: #ff7b6b; --info: #7cc0f0;
+    --node-top: color-mix(in srgb, var(--text) 7%, var(--surface)); --lift: rgb(0 0 0 / .45); --halo: 32%;
+    --font-body: 'IBM Plex Sans', 'Noto Sans SC', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+    --font-mono: 'IBM Plex Mono', 'Noto Sans SC', 'PingFang SC', ui-monospace, monospace;
+    --t-label: .75rem; --t-small: .875rem; --t-body: 1rem; --t-lead: 1.25rem; --t-h2: 1.625rem; --t-h1: clamp(2.25rem, 5.5vw, 4rem);
+    --s-1: .25rem; --s-2: .5rem; --s-3: .75rem; --s-4: 1rem; --s-5: 1.5rem; --s-6: 2rem; --s-7: 3rem; --s-8: 4.5rem;
+    --r-1: 4px; --r-2: 4px; /* Blueprint uses r-1 everywhere */
+    --ease: cubic-bezier(.16,1,.3,1); --fast: 150ms; --med: 300ms; --slow: 500ms;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f2f6fa; --surface: #ffffff; --border: #d6e0ea; --border-bright: #818f9e;
+      --text: #0f1a26; --text-dim: #4d6074; --accent: #a34700; --accent-dim: rgba(163,71,0,.12);
+      --ok: #1c7443; --warn: #776300; --risk: #b0341e; --info: #145f99;
+      --node-top: var(--surface); --lift: rgb(15 26 38 / .12); --halo: 22%;
+    }
+  }
+
+  /* base */
+  html { font-size: 17px; }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--bg); color: var(--text); font: 400 var(--t-body)/1.7 var(--font-body); text-wrap: pretty; font-kerning: normal; font-synthesis: none; -webkit-font-smoothing: antialiased; }
+  ::selection { background: var(--accent-dim); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  a { color: inherit; }
+  code { font: .875em var(--font-mono); font-variant-ligatures: none; overflow-wrap: anywhere; }
+
+  /* shell: sticky table of contents on the left, a top bar below 1000px */
+  .shell { max-width: 80rem; margin: 0 auto; display: grid; grid-template-columns: minmax(0, 1fr); }
+  .toc { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: var(--s-4); padding: var(--s-2) var(--s-5); background: var(--bg); border-bottom: 1px solid var(--border); min-width: 0; }
+  .toc .ve-label { flex: none; color: var(--text); }
+  .toc ol { list-style: none; padding: 0; display: flex; gap: var(--s-4); overflow-x: auto; scrollbar-width: none; mask-image: linear-gradient(90deg, #000 88%, transparent); min-width: 0; }
+  .toc ol::-webkit-scrollbar { display: none; }
+  .toc a { display: block; font: 500 var(--t-small) var(--font-mono); color: var(--text-dim); text-decoration: none; white-space: nowrap; padding: var(--s-1) 0; border-bottom: 2px solid transparent; transition: color var(--fast) var(--ease), border-color var(--fast) var(--ease); }
+  .toc a:hover, .toc a:focus-visible, .toc a.is-on { color: var(--text); }
+  .toc a.is-on { border-bottom-color: var(--accent); }
+  @media (min-width: 1000px) {
+    .shell { grid-template-columns: 10rem minmax(0, 1fr); gap: var(--s-6); padding: 0 var(--s-5); }
+    .toc { align-self: start; flex-direction: column; align-items: start; gap: var(--s-4); padding: var(--s-8) 0 0; border: 0; background: none; }
+    .toc ol { flex-direction: column; gap: var(--s-1); mask-image: none; overflow: visible; }
+    .toc a { border-bottom: 0; border-left: 2px solid transparent; padding: var(--s-1) 0 var(--s-1) var(--s-3); }
+    .toc a.is-on { border-left-color: var(--accent); }
+  }
+
+  main { min-width: 0; max-width: 64rem; padding: var(--s-8) var(--s-5); display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s-8); }
+  @media (min-width: 1000px) { main { padding: var(--s-8) 0; } }
+  section, figure, header { min-width: 0; }
+  section { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s-6); scroll-margin-top: 4rem; }
+  header { display: grid; gap: var(--s-4); scroll-margin-top: 4rem; }
+  header + figure { margin-top: calc(var(--s-6) - var(--s-8)); }
+  h1 { font-size: var(--t-h1); line-height: 1.15; font-weight: 600; letter-spacing: -.02em; text-wrap: balance; max-width: 15em; margin-bottom: var(--s-2); }
+  h2 { font-size: var(--t-h2); line-height: 1.35; font-weight: 600; letter-spacing: -.01em; text-wrap: balance; max-width: 30em; }
+  h3 { font-size: var(--t-body); line-height: 1.4; font-weight: 600; }
+  /* section opener: kicker head, a small mono label above the h2 */
+  .kick { display: grid; gap: var(--s-3); border-top: 1px solid var(--border); padding-top: var(--s-5); }
+  .eyebrow { display: flex; align-items: center; gap: var(--s-2); font: 600 var(--t-label) var(--font-mono); letter-spacing: .08em; color: var(--accent); }
+  .eyebrow::before { content: ''; width: 1.25rem; height: 2px; background: currentColor; }
+  .ve-label { font: 500 var(--t-label) var(--font-mono); color: var(--text-dim); }
+  .caps { letter-spacing: .08em; font-weight: 600; color: var(--text); }
+  .lead { font-size: var(--t-lead); line-height: 1.6; color: var(--text-dim); max-width: 34em; }
+  .lead b { color: var(--text); font-weight: 600; }
+  .meta { font: 500 var(--t-label) var(--font-mono); color: var(--text-dim); font-variant-numeric: tabular-nums; }
+  .body { max-width: 65ch; }
+  .body b { font-weight: 600; }
+  .unit { font-size: .5em; font-weight: 500; color: var(--text-dim); letter-spacing: 0; }
+
+  /* figure: the stage is a faint 24px blueprint grid */
+  .frame { background: linear-gradient(color-mix(in srgb, var(--border) 55%, transparent) 1px, transparent 1px) 0 0 / 24px 24px, linear-gradient(90deg, color-mix(in srgb, var(--border) 55%, transparent) 1px, transparent 1px) 0 0 / 24px 24px, var(--bg); border: 1px solid var(--border); border-radius: var(--r-1); padding: var(--s-5); overflow-x: auto; }
+  figcaption { font-size: var(--t-body); color: var(--text-dim); margin-top: var(--s-3); max-width: 65ch; }
+  .fig-n { font: 600 var(--t-label) var(--font-mono); color: var(--text); margin-right: var(--s-2); }
+
+  /* diagram kit */
+  /* min-width keeps 14-unit labels at 12px or more on a 960-unit viewBox; narrow screens scroll the frame */
+  .ve-svg { width: 100%; min-width: 830px; height: auto; display: block; font: 500 17px var(--font-body); }
+  .ve-n .sh { fill: url(#ve-node); stroke: var(--border-bright); stroke-width: 1.5; filter: drop-shadow(0 6px 14px var(--lift)); transition: stroke var(--fast) var(--ease), opacity var(--med) var(--ease); }
+  .ve-n .lid { fill: var(--node-top); }
+  .ve-n.is-key .sh { fill: color-mix(in srgb, var(--accent) 11%, var(--surface)); stroke: var(--accent); stroke-width: 2; filter: drop-shadow(0 0 16px color-mix(in srgb, var(--accent) var(--halo), transparent)); }
+  .ve-n.is-off .sh { stroke-dasharray: 5 4; filter: none; }
+  .ve-n text { fill: var(--text); text-anchor: middle; dominant-baseline: central; font-weight: 600; }
+  .ve-n .sub { fill: var(--text-dim); font: 500 14px var(--font-mono); }
+  .ve-n .src { fill: var(--text-dim); font: 600 14px var(--font-mono); letter-spacing: .04em; }
+  .ve-n .gl { fill: none; stroke: var(--text-dim); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
+  .ve-n.is-key .gl { stroke: var(--accent); }
+  .ve-e { fill: none; stroke: var(--text-dim); stroke-width: 1.75; marker-end: url(#ve-ah); }
+  .ve-e.is-hot { stroke: var(--accent); stroke-width: 2.75; filter: drop-shadow(0 0 5px color-mix(in srgb, var(--accent) 55%, transparent)); }
+  .ve-e.is-async { stroke-dasharray: 6 5; }
+  .ve-el { fill: var(--text-dim); font: 500 14px var(--font-mono); text-anchor: middle; paint-order: stroke; stroke: var(--bg); stroke-width: 5px; stroke-linejoin: round; }
+  .ve-el.l { text-anchor: end; } .ve-el.r { text-anchor: start; }
+  /* boundaries: dashed frames with a mono tag */
+  .ve-b { fill: none; stroke: var(--border-bright); stroke-width: 1; stroke-dasharray: 6 5; }
+  .ve-bt { fill: var(--text-dim); font: 600 14px var(--font-mono); letter-spacing: .04em; }
+  .ve-lab { fill: var(--text-dim); font: 500 14px var(--font-mono); paint-order: stroke; stroke: var(--bg); stroke-width: 4px; stroke-linejoin: round; }
+  .ve-lab.c { text-anchor: middle; } .ve-lab.e { text-anchor: end; }
+  .ve-life { fill: none; stroke: var(--border-bright); stroke-width: 1; stroke-dasharray: 3 4; }
+  .ve-note rect { fill: var(--surface); stroke: var(--border-bright); stroke-width: 1; stroke-dasharray: 4 3; }
+  .ve-note text { fill: var(--text-dim); font: 500 14px var(--font-mono); text-anchor: middle; dominant-baseline: central; }
+  .ve-note.l text { text-anchor: start; }
+  .ann, .guide, .tick { fill: none; stroke: var(--text-dim); stroke-width: 1; }
+  .guide { stroke: var(--border-bright); stroke-dasharray: 3 3; }
+  .axis { fill: none; stroke: var(--border-bright); stroke-width: 1; }
+  .ve-x { fill: none; stroke: var(--risk); stroke-width: 2.25; stroke-linecap: round; }
+  .lt rect { fill: var(--bg); stroke: var(--border-bright); stroke-width: 1; }
+  .ve-n .lt text { fill: var(--text); font: 600 14px var(--font-mono); }
+  .band { stroke-width: 1.25; }
+  .band.ok { fill: color-mix(in srgb, var(--ok) 20%, transparent); stroke: var(--ok); }
+  .band.risk { fill: color-mix(in srgb, var(--risk) 20%, transparent); stroke: var(--risk); }
+  .band.info { fill: color-mix(in srgb, var(--info) 20%, transparent); stroke: var(--info); }
+  .bt { fill: var(--text); font: 600 14px var(--font-mono); text-anchor: middle; dominant-baseline: central; }
+  .dia { fill: color-mix(in srgb, var(--info) 25%, var(--bg)); stroke: var(--info); stroke-width: 1.5; }
+  .obs { fill: none; stroke: var(--text-dim); stroke-width: 1.75; }
+  .qs { fill: var(--text); }
+  .wr { fill: var(--ok); }
+  /* dimension lines: the number sits on the span it measures */
+  .ve-dim path { fill: none; stroke-width: 1; } .ve-dim .ext { stroke: var(--border-bright); } .ve-dim .ln { stroke: var(--text-dim); }
+  .ve-dim text { fill: var(--text); font: 500 14px var(--font-mono); text-anchor: middle; paint-order: stroke; stroke: var(--bg); stroke-width: 4px; }
+  .ve-dim text.v { text-anchor: end; dominant-baseline: central; }
+  .ve-dim.is-key .ln { stroke: var(--accent); } .ve-dim.is-key text { fill: var(--accent); }
+  /* numbered callouts on the drawing */
+  .ve-co circle { fill: var(--surface); stroke: var(--accent); stroke-width: 1.75; }
+  .ve-co text { fill: var(--accent); font: 600 14px var(--font-mono); text-anchor: middle; dominant-baseline: central; }
+  .co-notes { list-style: none; padding: 0; display: grid; gap: var(--s-2); margin-top: var(--s-3); max-width: 65ch; }
+  .co-notes li { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--s-3); align-items: baseline; }
+  .co { display: inline-grid; place-items: center; width: 1.35rem; height: 1.35rem; border: 1.5px solid var(--accent); border-radius: 50%; font: 600 var(--t-label) var(--font-mono); color: var(--accent); }
+
+  /* linked highlighting */
+  .ve-ref { text-decoration: underline dotted var(--text-dim) 1px; text-underline-offset: .22em; border-radius: var(--r-1); transition: background var(--fast) var(--ease); cursor: default; }
+  .ve-ref.is-lit { background: var(--accent-dim); text-decoration-color: var(--accent); }
+  svg [data-ref] { transition: opacity var(--med) var(--ease); }
+  svg.has-lit path[data-ref]:not(.is-lit), svg.has-lit g[data-ref]:not(.is-lit) .sh { opacity: .25; }
+  svg.has-lit g[data-ref]:not(.is-lit) text, svg.has-lit text[data-ref]:not(.is-lit) { fill: var(--text-dim); }
+  .ve-n.is-lit .sh { stroke: var(--accent); }
+  .ve-e.is-lit { stroke: var(--accent); }
+  .ve-el.is-lit { fill: var(--text); }
+
+  /* stepper / scene player */
+  .ve-steps [data-s] { transition: opacity var(--slow) var(--ease), stroke-dashoffset var(--slow) var(--ease); }
+  .ve-steps [data-s]:not(.on) { opacity: .15; }
+  .ve-steps g[data-s]:not(.on) text, .ve-steps text[data-s]:not(.on) { opacity: 0; }
+  .ve-steps .ve-n.now > .sh { stroke: var(--accent); }
+  .ve-steps:not(.is-full) .ve-e.now { stroke: var(--accent); stroke-width: 2.75; }
+  .ve-tok { fill: var(--accent); visibility: hidden; }
+  .ve-steps:not(.is-still) .ve-tok.now { visibility: visible; animation: ve-run var(--dur, 900ms) ease-in-out var(--d, 0ms) both; }
+  @keyframes ve-run { from { offset-distance: 0%; opacity: 0; } 10%, 75% { opacity: 1; } to { offset-distance: 100%; opacity: 0; } }
+  .ve-steps .ve-at { transition: opacity var(--med) var(--ease); }
+  .ve-steps .ve-at:not(.now) { opacity: 0; }
+  .ve-steps .ve-at.now { transition-delay: var(--d, 0ms); }
+  .ve-steps .ve-vals text { transition: none; }
+  .ve-vals text.on:has(~ text.on) { opacity: 0; }
+  .ve-player { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; align-items: center; gap: var(--s-2) var(--s-3); margin-top: var(--s-4); }
+  .ve-cap { grid-column: 1 / -1; list-style: none; padding: 0; min-height: 3.4em; max-width: 65ch; }
+  .ve-cap li::before { content: attr(data-n); font: 600 var(--t-label) var(--font-mono); color: var(--accent); margin-right: var(--s-3); font-variant-numeric: tabular-nums; }
+  .ve-player input { accent-color: var(--accent); min-width: 0; }
+  button { font: 500 var(--t-small) var(--font-mono); color: var(--text); background: var(--surface); border: 1px solid var(--border-bright); border-radius: var(--r-1); padding: var(--s-2) var(--s-3); cursor: pointer; transition: border-color var(--fast) var(--ease); }
+  button:hover, button:focus-visible { border-color: var(--accent); }
+  /* parts of the notification replay */
+  .slot { fill: none; stroke: var(--border-bright); stroke-width: 1; stroke-dasharray: 4 3; }
+  .jb { fill: var(--surface); stroke: var(--border-bright); stroke-width: 1.25; }
+  .jf { stroke-width: 1.5; }
+  .jf.ok { fill: color-mix(in srgb, var(--ok) 20%, var(--surface)); stroke: var(--ok); }
+  .jf.risk { fill: color-mix(in srgb, var(--risk) 20%, var(--surface)); stroke: var(--risk); }
+  .jt { fill: var(--text); font: 600 14px var(--font-mono); text-anchor: middle; dominant-baseline: central; }
+  .msg rect { fill: var(--surface); stroke: var(--border-bright); stroke-width: 1; }
+  .msg path { fill: none; stroke: var(--accent); stroke-width: 1.5; stroke-linejoin: round; }
+  .msg text { fill: var(--text); font: 500 14px var(--font-mono); dominant-baseline: central; }
+
+  /* small multiples */
+  .cases { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(20rem, 100%), 1fr)); gap: var(--s-4); }
+  .case { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-1); padding: var(--s-4); display: grid; gap: var(--s-3); align-content: start; min-width: 0; }
+  .case[data-st=ok] { --st: var(--ok); } .case[data-st=warn] { --st: var(--warn); } .case[data-st=risk] { --st: var(--risk); } .case[data-st=info] { --st: var(--info); }
+  .ve-mini { width: 100%; max-width: 22rem; height: auto; font: 600 15px var(--font-body); overflow: visible; }
+  .ve-mini .ve-n .sh { filter: none; }
+  .ve-mini .ve-n .sub { font-size: 13px; }
+  .ve-mini .ve-el, .ve-mini .ml { font-size: 13px; }
+  .ve-mini .ml { fill: var(--text-dim); font-family: var(--font-mono); font-weight: 500; paint-order: stroke; stroke: var(--surface); stroke-width: 4px; }
+  .ve-mini .ml.c { text-anchor: middle; } .ve-mini .ml.e { text-anchor: end; }
+  .ve-mini .ve-el { stroke: var(--surface); }
+  .ve-mini .ve-dim text { font-size: 13px; stroke: var(--surface); }
+  .ve-mini .is-st.ve-e { stroke: var(--st); stroke-width: 2.75; }
+  .ve-mini .is-st .sh { stroke: var(--st); stroke-width: 2; }
+  .ve-mini .is-st .sub { fill: var(--st); }
+  .ve-mini .pm { fill: var(--text-dim); }
+  .ve-mini .pm.is-st { fill: var(--st); }
+  .ve-mini .mk { fill: var(--text); }
+  .ve-mini .ve-dim.is-st .ln { stroke: var(--st); }
+
+  /* chips: shape and word */
+  .chip { display: inline-flex; align-items: center; gap: var(--s-2); font: 600 var(--t-label) var(--font-mono); line-height: 1.5; padding: 1px var(--s-2); border: 1px solid currentColor; border-radius: var(--r-1); white-space: nowrap; justify-self: start; }
+  .chip::before { content: ''; width: .5rem; height: .5rem; background: currentColor; flex: none; }
+  .chip.ok { color: var(--ok); } .chip.ok::before { border-radius: 50%; }
+  .chip.warn { color: var(--warn); } .chip.warn::before { clip-path: polygon(50% 0, 100% 100%, 0 100%); }
+  .chip.risk { color: var(--risk); }
+  .chip.info { color: var(--info); } .chip.info::before { transform: rotate(45deg) scale(.85); }
+  .chip.plain { color: var(--text-dim); } .chip.plain::before { background: none; border: 1.5px solid currentColor; border-radius: 50%; }
+
+  /* KPI strip */
+  .kpis { display: flex; flex-wrap: wrap; gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: var(--r-1); overflow: hidden; }
+  .kpi { flex: 1 1 22rem; background: var(--surface); padding: var(--s-5); display: grid; grid-template-rows: auto auto 1fr; gap: var(--s-3); min-width: 0; }
+  .kpi .val { font: 600 2.75rem/1 var(--font-body); font-variant-numeric: tabular-nums; letter-spacing: -.04em; }
+  .ve-bars, .ve-slots { align-self: end; width: 100%; max-width: 16rem; height: auto; font: 500 13px var(--font-mono); overflow: visible; }
+  .ve-bars text, .ve-slots text { fill: var(--text-dim); dominant-baseline: central; }
+  .ve-bars text.h { paint-order: stroke; stroke: var(--surface); stroke-width: 4px; }
+  .ve-bars rect { fill: var(--border-bright); transform-box: fill-box; transform-origin: left; transition: transform 900ms var(--ease) 150ms; }
+  .ve-bars .hot { fill: var(--accent); }
+  .lim { fill: none; stroke: var(--text-dim); stroke-width: 1; stroke-dasharray: 3 3; }
+  .c-old { fill: var(--border-bright); } .c-ok { fill: var(--ok); } .c-no { fill: none; stroke: var(--risk); stroke-width: 1.5; }
+
+  /* HTML bars: labels stay in rem on every screen */
+  .hbars { display: grid; gap: var(--s-2); }
+  .hb { display: grid; grid-template-columns: 11.5rem minmax(0, 1fr); gap: var(--s-3); align-items: center; font: 500 var(--t-label) var(--font-mono); color: var(--text-dim); min-width: 0; }
+  .hb.m { grid-template-columns: 8rem minmax(0, 1fr) minmax(0, 1.25fr); }
+  .hb .hd { color: var(--text-dim); font-family: var(--font-body); font-size: var(--t-label); line-height: 1.45; }
+  .hb code { color: var(--text); font-size: 1em; }
+  .track { display: flex; align-items: center; min-width: 0; }
+  .bar { flex: none; height: .8rem; width: calc(var(--v) * (100% - 5rem)); background: var(--border-bright); border-radius: 2px; transform-origin: left; transition: transform 900ms var(--ease) 150ms; }
+  .bar.hot { background: var(--accent); }
+  .bar.rng { background: color-mix(in srgb, var(--border-bright) 45%, transparent); border-radius: 0 2px 2px 0; }
+  .hv { margin-left: var(--s-2); color: var(--text); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  @media (max-width: 40rem) {
+    .hb, .hb.m { grid-template-columns: minmax(0, 1fr); gap: var(--s-1); }
+    .hb { padding-bottom: var(--s-1); }
+  }
+  .mods { display: grid; gap: var(--s-5); }
+  .mg { display: grid; gap: var(--s-2); }
+  .mg > .ve-label b { color: var(--text); font-weight: 600; }
+
+  /* tools grouped by use, each marked by its MCP annotation */
+  .tools { display: grid; gap: var(--s-4); }
+  .tg { display: grid; grid-template-columns: 7rem minmax(0, 1fr); gap: var(--s-4); align-items: start; border-top: 1px solid var(--border); padding-top: var(--s-3); }
+  .tg:first-child { border-top: 0; padding-top: 0; }
+  .tg > .ve-label { padding-top: var(--s-2); color: var(--text); }
+  .tg ul { list-style: none; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(13.5rem, 100%), 1fr)); gap: var(--s-2); }
+  .tool { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-1); padding: var(--s-2) var(--s-3); display: grid; gap: 2px; min-width: 0; }
+  .tool code { font: 500 var(--t-small) var(--font-mono); color: var(--text); }
+  .tool code::before, .mk { content: ''; display: inline-block; width: .55rem; height: .55rem; margin-right: var(--s-2); vertical-align: .02em; }
+  .tool.ro code::before, .mk.ro { border: 1.5px solid var(--text-dim); border-radius: 50%; }
+  .tool.wr { border-color: var(--border-bright); }
+  .tool.wr code::before, .mk.wr { background: var(--text); clip-path: polygon(50% 0, 100% 100%, 0 100%); }
+  .tool.de { border-color: var(--risk); }
+  .tool.de code::before, .mk.de { background: var(--risk); }
+  .tool span { font-size: var(--t-label); color: var(--text-dim); line-height: 1.45; }
+  .legend { font: 500 var(--t-label) var(--font-mono); color: var(--text-dim); display: flex; flex-wrap: wrap; gap: var(--s-2) var(--s-5); border-top: 1px solid var(--border); padding-top: var(--s-3); }
+  @media (max-width: 40rem) { .tg { grid-template-columns: minmax(0, 1fr); gap: var(--s-2); } }
+
+  /* checks: fail vs warn */
+  .checks { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(20rem, 100%), 1fr)); gap: var(--s-6); }
+  .checks > div { min-width: 0; }
+  .ck { list-style: none; padding: 0; display: grid; gap: var(--s-3); margin-top: var(--s-4); }
+  .ck li { position: relative; padding-left: var(--s-5); line-height: 1.6; }
+  .ck li::before { content: ''; position: absolute; left: 0; top: .55em; width: .55rem; height: .55rem; background: var(--st); }
+  .ck.risk { --st: var(--risk); } .ck.warn { --st: var(--warn); }
+  .ck.warn li::before { clip-path: polygon(50% 0, 100% 100%, 0 100%); }
+  .ck small code, .fmap p code { font-size: 1em; }
+  .ck small { display: block; color: var(--text-dim); font-size: var(--t-label); line-height: 1.5; margin-top: 2px; }
+
+  /* file map */
+  .fmap { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(17rem, 100%), 1fr)); gap: var(--s-6) var(--s-5); }
+  .fmap > div { min-width: 0; }
+  .fmap h3 { font: 600 var(--t-small) var(--font-mono); margin-bottom: var(--s-3); overflow-wrap: anywhere; }
+  .fmap ul { list-style: none; padding: 0; display: grid; gap: var(--s-2); border-left: 1px solid var(--border-bright); }
+  .fmap li { display: grid; gap: 0; padding-left: var(--s-4); position: relative; font-size: var(--t-small); }
+  .fmap li::before { content: ''; position: absolute; left: 0; top: .8em; width: var(--s-3); height: 1px; background: var(--border-bright); }
+  .fmap li code { color: var(--text); font-size: 1em; }
+  .fmap .d, .fmap p { font-size: var(--t-label); color: var(--text-dim); line-height: 1.5; }
+  .fmap p { margin-top: var(--s-3); }
+  .tag { display: inline-block; font: 600 var(--t-label) var(--font-mono); color: var(--accent); border: 1px solid currentColor; border-radius: var(--r-1); padding: 0 var(--s-1); margin-left: var(--s-1); line-height: 1.4; }
+
+  /* tables */
+  .table-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--r-1); }
+  table { border-collapse: collapse; width: 100%; min-width: 44rem; }
+  th { background: var(--surface); font: 600 var(--t-label) var(--font-mono); color: var(--text-dim); text-align: left; padding: var(--s-3) var(--s-4); letter-spacing: .04em; }
+  td { padding: var(--s-3) var(--s-4); border-top: 1px solid var(--border); vertical-align: top; font-size: var(--t-body); line-height: 1.55; }
+  td:first-child { white-space: nowrap; }
+
+  /* timeline */
+  .tl { list-style: none; padding: 0; display: grid; gap: var(--s-5); position: relative; }
+  .tl::before { content: ''; position: absolute; left: .32rem; top: .6rem; bottom: .6rem; width: 1px; background: var(--border-bright); }
+  .tl li { display: grid; grid-template-columns: 3.5rem minmax(0, 1fr); gap: var(--s-3); padding-left: var(--s-5); position: relative; }
+  .tl li::before { content: ''; position: absolute; left: 0; top: .45rem; width: .65rem; height: .65rem; border: 1.5px solid var(--border-bright); background: var(--bg); border-radius: 50%; }
+  .tl li.now::before { border-color: var(--accent); background: var(--accent); }
+  .tl time { font: 600 var(--t-label) var(--font-mono); color: var(--text-dim); padding-top: .2rem; font-variant-numeric: tabular-nums; }
+  .tl li.now time { color: var(--accent); }
+  .tl p { color: var(--text-dim); font-size: var(--t-small); line-height: 1.6; }
+  .two { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(20rem, 100%), 1fr)); gap: var(--s-6); align-items: start; }
+
+  /* live figure */
+  .ctl { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2) var(--s-3); font: 500 var(--t-small) var(--font-mono); color: var(--text-dim); margin-top: var(--s-4); }
+  .ctl input { accent-color: var(--accent); width: min(22rem, 100%); }
+  .ctl output { color: var(--text); font-variant-numeric: tabular-nums; min-width: 2ch; display: inline-block; text-align: right; }
+  .readout { margin-top: var(--s-3); display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2) var(--s-3); font-variant-numeric: tabular-nums; }
+  .readout b { font-weight: 600; }
+  .seg.m { fill: color-mix(in srgb, var(--text-dim) 30%, transparent); stroke: var(--border-bright); stroke-width: 1; }
+  .seg.r { fill: url(#ve-hatch); stroke: var(--border-bright); stroke-width: 1; }
+  .seg.q { fill: var(--accent); }
+  .segt { fill: var(--text); font: 500 14px var(--font-mono); text-anchor: middle; dominant-baseline: central; paint-order: stroke; stroke: var(--bg); stroke-width: 4px; }
+  .tk { fill: none; stroke-width: 1.5; stroke-dasharray: 4 3; }
+  .tk.warn { stroke: var(--warn); } .tk.risk { stroke: var(--risk); }
+  .side { display: grid; gap: var(--s-3); margin-top: var(--s-5); max-width: 40rem; }
+
+  /* callouts, notes, code */
+  .callouts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(17rem, 100%), 1fr)); gap: var(--s-4); }
+  .callout { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-1); padding: var(--s-4); display: grid; gap: var(--s-2); align-content: start; min-width: 0; }
+  .callout p { font-size: var(--t-small); line-height: 1.65; }
+  .notes { list-style: none; padding: 0; display: grid; gap: var(--s-3); max-width: 65ch; }
+  .notes li { position: relative; padding-left: var(--s-5); }
+  .notes li::before { content: ''; position: absolute; left: 0; top: .7em; width: .5rem; height: 1px; background: var(--text-dim); }
+  .notes b { font-weight: 600; }
+  pre { font: var(--t-small)/1.65 var(--font-mono); background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-1); padding: var(--s-4); overflow-x: auto; color: var(--text); margin-top: var(--s-3); }
+  pre code { font-size: 1em; overflow-wrap: normal; }
+  details { border-top: 1px solid var(--border); padding-top: var(--s-4); color: var(--text-dim); font-size: var(--t-body); }
+  summary { cursor: pointer; font: 500 var(--t-small) var(--font-mono); color: var(--text); }
+  details > ul { margin-top: var(--s-3); padding-left: var(--s-5); display: grid; gap: var(--s-2); max-width: 65ch; }
+  details .table-scroll { margin-top: var(--s-3); }
+  .sources { border-top: 1px solid var(--border); padding-top: var(--s-4); display: grid; gap: var(--s-2); }
+  .sources p { color: var(--text-dim); font-size: var(--t-small); max-width: 75ch; }
+
+  /* entrance: blocks rise in once; bars grow as their block arrives (JS adds .js-motion only when motion is allowed) */
+  .js-motion main > * { transition: opacity var(--slow) var(--ease), transform var(--slow) var(--ease); }
+  .js-motion main > :not(.in) { opacity: 0; transform: translateY(1rem); }
+  .js-motion main > :not(.in) .ve-bars rect, .js-motion main > :not(.in) .bar { transform: scaleX(0); }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } .ve-tok { display: none; } }
+
+  @media print {
+    :root { --bg: #fff; --surface: #fff; --border: #d6e0ea; --border-bright: #818f9e; --text: #0f1a26; --text-dim: #4d6074; --accent: #a34700; --accent-dim: rgba(163,71,0,.12); --ok: #1c7443; --warn: #776300; --risk: #b0341e; --info: #145f99; --node-top: #fff; }
+    .toc, .ve-player button, .ve-player input, .ctl { display: none; }
+    .shell { display: block; }
+    .frame { overflow: visible; background: #fff; } .ve-svg { min-width: 0; }
+    .frame, .case, .kpi, .callout, .tl li { break-inside: avoid; } h2 { break-after: avoid; }
+    svg * { filter: none !important; }
+    .js-motion main > * { opacity: 1 !important; transform: none !important; }
+    .js-motion .ve-bars rect, .js-motion .bar { transform: none !important; }
+    .ve-steps [data-s]:not(.on), .ve-steps g[data-s]:not(.on) text, .ve-steps text[data-s]:not(.on) { opacity: 1; }
+    .ve-steps .ve-at:not(.now) { opacity: 0; }
+    .ve-tok { display: none; }
+  }
+</style>
+</head>
+<body>
+<!-- Shared defs: one arrowhead (context-stroke follows each edge's color) and the node fill. -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <marker id="ve-ah" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M0 0L10 5L0 10z" fill="context-stroke"/></marker>
+    <linearGradient id="ve-node" x1="0" y1="0" x2="0" y2="1"><stop offset="0" style="stop-color:var(--node-top)"/><stop offset="1" style="stop-color:var(--surface)"/></linearGradient>
+    <pattern id="ve-hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="2.5" height="6" style="fill:var(--border-bright)"/></pattern>
+  </defs>
+</svg>
+
+<div class="shell">
+<nav class="toc" aria-label="目录">
+  <span class="ve-label">miyabi-mcp</span>
+  <ol>
+    <li><a href="#overview">总览</a></li>
+    <li><a href="#access">接入</a></li>
+    <li><a href="#tools">工具</a></li>
+    <li><a href="#code">结构</a></li>
+    <li><a href="#submit">提交</a></li>
+    <li><a href="#ledger">台账</a></li>
+    <li><a href="#limits">上限</a></li>
+    <li><a href="#notify">通知</a></li>
+    <li><a href="#hosting">托管</a></li>
+    <li><a href="#export">导出</a></li>
+    <li><a href="#status">状态</a></li>
+  </ol>
+</nav>
+
+<main>
+
+  <header id="overview">
+    <p class="eyebrow">miyabi-toolbox · miyabi-mcp · 设计说明</p>
+    <h1>服务跑在 PBS 旁边，<br>agent 在哪里都用同一组工具</h1>
+    <p class="lead">miyabi-mcp 把 Miyabi 的 PBS 做成 16 个带护栏的 MCP 工具。<b>写操作先出计划再提交</b>，长等待变成<span class="ve-ref" data-ref="notifyd" tabindex="0">通知</span>，每个作业都记进项目自己的<span class="ve-ref" data-ref="ledger" tabindex="0">台账</span>。</p>
+    <p class="meta">v0.1 · main 分支 b54210f · 2026-11-06 · Python ≥ 3.11，核心只用标准库 · 站点数字带日期，会过时</p>
+  </header>
+
+  <figure class="ve-steps">
+    <div class="frame">
+      <svg class="ve-svg" viewBox="0 0 960 470" role="img" aria-label="工作站上的 agent 经 pi-env-mcp 的一条 ssh 会话，调用登录节点上托管的 miyabi-mcp serve；登录节点上的 agent 也可以直接以 stdio 启动它。serve 以 argv 运行 PBS 命令，把记录和事件写进 /work 上的台账。工作站上的 notifyd 每 180 秒经 ssh 运行一次 notify poll，poll 读共享快照、判定通知条件，notifyd 再在本机投递给 agent。">
+        <rect class="ve-b" x="16" y="16" width="286" height="438" rx="4"/>
+        <text class="ve-bt" x="30" y="40">工作站</text>
+        <rect class="ve-b" x="338" y="16" width="358" height="438" rx="4"/>
+        <text class="ve-bt" x="352" y="40">Miyabi 登录节点 · g1 / g2 / g3</text>
+
+        <path class="ve-e" data-s="0 1" data-ref="pienv" d="M169 140V210"/>
+        <text class="ve-el r" data-s="0 1" data-ref="pienv" x="179" y="180">MCP · 方式 B</text>
+        <path class="ve-e is-hot" data-s="0 1" data-ref="pienv serve" d="M282 244H358"/>
+        <text class="ve-el" data-s="0 1" data-ref="pienv serve" x="320" y="235">ssh ×1</text>
+        <path class="ve-e" d="M517 140V204"/>
+        <text class="ve-el r" x="527" y="176">stdio · 方式 A</text>
+        <path class="ve-e" data-s="0 2" data-ref="pbs" d="M676 244H736"/>
+        <text class="ve-el" data-s="0 2" data-ref="pbs" x="706" y="235">argv</text>
+        <path class="ve-e" data-s="0 3" data-ref="ledger" d="M620 284V318H800V342"/>
+        <text class="ve-el" data-s="0 3" data-ref="ledger" x="716" y="309">写记录 · 事件</text>
+        <path class="ve-e is-async" data-s="0 4" data-ref="notifyd" d="M282 390H358"/>
+        <text class="ve-el" data-s="0 4" data-ref="notifyd" x="320" y="381">每 180&#160;s</text>
+        <path class="ve-e" data-s="0 5" data-ref="ledger" d="M676 390H736"/>
+        <text class="ve-el" data-s="0 5" data-ref="ledger" x="706" y="381">读快照</text>
+        <path class="ve-e" data-s="0 6" data-ref="notifyd" d="M56 400H36V100H56"/>
+        <text class="ve-el r" data-s="0 6" data-ref="notifyd" x="44" y="318">投递 · listener</text>
+
+        <!-- replay tokens: one per step; they run under the nodes -->
+        <circle class="ve-tok" data-s="1" r="5" style="offset-path: path('M169 102V244H517'); --dur: 1500ms"/>
+        <circle class="ve-tok" data-s="2" r="5" style="offset-path: path('M517 244H840')"/>
+        <circle class="ve-tok" data-s="3" r="5" style="offset-path: path('M620 244V318H800V390'); --dur: 1300ms"/>
+        <circle class="ve-tok" data-s="4" r="5" style="offset-path: path('M169 390H517')"/>
+        <circle class="ve-tok" data-s="5" r="5" style="offset-path: path('M517 390H840')"/>
+        <circle class="ve-tok" data-s="6" r="5" style="offset-path: path('M169 390H36V100H169'); --dur: 1500ms"/>
+
+        <g class="ve-n" data-s="0 1 6" data-ref="agent" transform="translate(56 64)"><rect class="sh" width="226" height="76" rx="4"/><path class="gl" transform="translate(12 12)" d="M0 1h16v14H0zM3.5 5.5l3 2.5-3 2.5M8.5 11h4"/><text x="113" y="30">agent</text><text class="sub" x="113" y="54">Claude Code · Codex</text></g>
+        <g class="ve-n" data-s="0 1" data-ref="pienv" transform="translate(56 210)"><rect class="sh" width="226" height="68" rx="4"/><text x="113" y="26">pi-env-mcp serve</text><text class="sub" x="113" y="48">注册名 miyabi-g</text></g>
+        <g class="ve-n" data-s="0 4 6" data-ref="notifyd" transform="translate(56 356)"><rect class="sh" width="226" height="68" rx="4"/><path class="gl" transform="translate(12 12)" d="M15 8A7 7 0 1 1 1 8A7 7 0 1 1 15 8M8 4V8L11 10"/><text x="113" y="26">notifyd</text><text class="sub" x="113" y="48">agent 启动 · 本机投递</text></g>
+        <g class="ve-n" transform="translate(358 64)"><rect class="sh" width="318" height="76" rx="4"/><path class="gl" transform="translate(12 12)" d="M0 1h16v14H0zM3.5 5.5l3 2.5-3 2.5M8.5 11h4"/><text x="159" y="30">登录节点上的 agent</text><text class="sub" x="159" y="54">tmux 或 herdr 中</text></g>
+        <g class="ve-n is-key" data-s="0 1 2 3" data-ref="serve" transform="translate(358 204)"><rect class="sh" width="318" height="80" rx="4"/><text x="159" y="30">miyabi-mcp serve</text><text class="sub" x="159" y="56">16 个工具 · 每个 agent 一个进程</text></g>
+        <g class="ve-n" data-s="0 4 5" data-ref="notifyd" transform="translate(358 356)"><rect class="sh" width="318" height="68" rx="4"/><text x="159" y="26">miyabi-mcp notify poll</text><text class="sub" x="159" y="48">CLI · 判定通知条件</text></g>
+        <g class="ve-n" data-s="0 2" data-ref="pbs" transform="translate(736 204)"><rect class="sh" width="208" height="80" rx="4"/><path class="gl" transform="translate(12 12)" d="M0 2h16v12H0zM5 2v12M9 2v12M13 2v12"/><text x="104" y="30">PBS</text><text class="sub" x="104" y="56">qstat · qsub · qdel</text></g>
+        <g class="ve-n" data-s="0 3 5" data-ref="ledger" transform="translate(736 342)"><path class="sh" d="M0 10V86A104 10 0 0 0 208 86V10"/><ellipse class="sh lid" cx="104" cy="10" rx="104" ry="10"/><text x="104" y="48">/work · Lustre</text><text class="sub" x="104" y="72">.miyabi-mcp 台账</text></g>
+      </svg>
+    </div>
+    <div class="ve-player">
+      <ol class="ve-cap">
+        <li data-n="1/7">agent 调用 <code>miyabi_pbs__job_submit</code>；pi-env-mcp 经它已有的 ssh 会话，把调用转给登录节点上托管的服务端。</li>
+        <li data-n="2/7">服务端先出计划，再凭 <code>plan_digest</code> 提交；qsub 以 argv 运行，不经 shell。</li>
+        <li data-n="3/7">记录、脚本快照和 <code>submitted</code> 事件写进项目目录下的 <code>.miyabi-mcp/</code>。</li>
+        <li data-n="4/7">agent 登记通知后运行返回的命令，启动 notifyd；它每 180 秒经 ssh 运行一次 <code>notify poll</code>。</li>
+        <li data-n="5/7">poll 用共享的 qstat 快照（最长 60 秒前）刷新作业，在登录节点上判定通知条件。</li>
+        <li data-n="6/7">条件满足后，notifyd 在本机投递：listener 退出，agent 收到一条汇总消息。</li>
+        <li data-n="7/7">全貌：判定在登录节点上，投递在 agent 所在的机器上。</li>
+      </ol>
+      <button data-go="-1" aria-label="上一步">←</button>
+      <button data-play>播放</button>
+      <input type="range" min="0" value="0" aria-label="步骤">
+      <button data-go="1" aria-label="下一步">→</button>
+    </div>
+    <figcaption><span class="fig-n">Fig. 1</span>服务端紧挨 PBS 和 /work 运行；工作站上只有连接（<span class="ve-ref" data-ref="pienv" tabindex="0">pi-env-mcp</span>）和投递（<span class="ve-ref" data-ref="notifyd" tabindex="0">notifyd</span>）。</figcaption>
+  </figure>
+
+  <section id="access">
+    <div class="kick"><p class="ve-label caps">接入</p><h2>远端 agent 只注册 pi-env-mcp，服务端搭它已有的连接</h2></div>
+    <p class="body">服务端必须在登录节点上：PBS 命令、作业日志和台账都在那里。放在工作站上，每次读文件和执行命令都要跨 ssh，等于重做一遍 pi-env-mcp。<b>miyabi-mcp 的代码不依赖 pi-env-mcp</b>：pi-env-mcp 管连接、文件、终端和传输，miyabi-mcp 管 PBS 语义。</p>
+    <figure>
+      <div class="cases">
+        <div class="case" data-st="ok"><span class="chip ok">登录节点</span><h3>A · 直接 stdio</h3>
+          <svg class="ve-mini" viewBox="0 0 300 100" role="img" aria-label="登录节点上的 agent 直接以 stdio 启动 miyabi-mcp serve，中间没有别的进程">
+            <path class="ve-e is-st" d="M78 54H222"/><text class="ve-el" x="150" y="45">stdio</text>
+            <g class="ve-n"><rect class="sh" x="2" y="34" width="76" height="40" rx="4"/><text x="40" y="54">agent</text></g>
+            <g class="ve-n"><rect class="sh" x="222" y="28" width="76" height="52" rx="4"/><text x="260" y="46">serve</text><text class="sub" x="260" y="66">同一台</text></g>
+          </svg></div>
+        <div class="case" data-st="ok"><span class="chip ok">推荐</span><h3>B · pi-env-mcp 托管</h3>
+          <svg class="ve-mini" viewBox="0 0 300 100" role="img" aria-label="工作站上的 agent 经 MCP 调用 pi-env-mcp，pi-env-mcp 经一条 ssh 会话调用它在登录节点上托管的 serve">
+            <path class="ve-e" d="M78 54H112"/><text class="ve-el" x="95" y="20">MCP</text>
+            <path class="ve-e is-st" d="M188 54H222"/><text class="ve-el" x="205" y="20">ssh ×1</text>
+            <g class="ve-n"><rect class="sh" x="2" y="34" width="76" height="40" rx="4"/><text x="40" y="54">agent</text></g>
+            <g class="ve-n is-st"><rect class="sh" x="112" y="34" width="76" height="40" rx="4"/><text x="150" y="54">pi-env</text></g>
+            <g class="ve-n"><rect class="sh" x="222" y="28" width="76" height="52" rx="4"/><text x="260" y="46">serve</text><text class="sub" x="260" y="66">托管</text></g>
+          </svg></div>
+        <div class="case" data-st="info"><span class="chip info">免注册</span><h3>C · 经 bash 调用 CLI</h3>
+          <svg class="ve-mini" viewBox="0 0 300 100" role="img" aria-label="agent 用 pi-env-mcp 的 bash 在登录节点上运行 miyabi-mcp 子命令，输出同一份 JSON">
+            <path class="ve-e" d="M78 54H112"/><text class="ve-el" x="95" y="20">bash</text>
+            <path class="ve-e" d="M188 54H222"/><text class="ve-el" x="205" y="20">ssh</text>
+            <g class="ve-n"><rect class="sh" x="2" y="34" width="76" height="40" rx="4"/><text x="40" y="54">agent</text></g>
+            <g class="ve-n"><rect class="sh" x="112" y="34" width="76" height="40" rx="4"/><text x="150" y="54">pi-env</text></g>
+            <g class="ve-n is-st"><rect class="sh" x="222" y="28" width="76" height="52" rx="4"/><text x="260" y="46">CLI</text><text class="sub" x="260" y="66">同一 JSON</text></g>
+          </svg></div>
+        <div class="case" data-st="info"><span class="chip info">仍走 ssh</span><h3>notifyd 与 export_command</h3>
+          <svg class="ve-mini" viewBox="0 0 300 100" role="img" aria-label="工作站上的 notifyd 和 export_command 不经 pi-env-mcp，直接经 ssh 主连接运行登录节点上的 miyabi-mcp 命令">
+            <path class="ve-e" d="M78 54H112"/><text class="ve-el" x="95" y="20">BatchMode</text>
+            <path class="ve-e" d="M188 54H222"/>
+            <g class="ve-n"><rect class="sh" x="2" y="34" width="76" height="40" rx="4"/><text x="40" y="54">notifyd</text></g>
+            <g class="ve-n is-st"><rect class="sh" x="112" y="34" width="76" height="40" rx="4"/><text x="150" y="54">ssh</text></g>
+            <g class="ve-n"><rect class="sh" x="222" y="28" width="76" height="52" rx="4"/><text x="260" y="46">CLI</text><text class="sub" x="260" y="66">poll、导出</text></g>
+          </svg></div>
+      </div>
+      <div class="side">
+        <p class="ve-label">一次调用的连接开销 · 11-06 实测</p>
+        <div class="hbars" role="img" aria-label="一次调用的连接开销：经 ssh 主连接 0.6 秒；经 pi-env-mcp 的 MCP 接口一次性调用 2.3 到 2.5 秒">
+          <div class="hb"><span>经 ssh 主连接</span><span class="track"><span class="bar hot" style="--v:.24"></span><span class="hv">0.6&#160;s</span></span></div>
+          <div class="hb"><span>经 pi-env-mcp 一次性调用</span><span class="track"><span class="bar" style="--v:.92"></span><span class="bar rng" style="--v:.08"></span><span class="hv">2.3–2.5&#160;s</span></span></div>
+        </div>
+      </div>
+      <figcaption><span class="fig-n">Fig. 2</span>三种方式调用同一组工具，输出同一份 JSON。notifyd 和 export_command 仍直接走 ssh 主连接，因为每次调用快约 4 倍；要让它们也走 pi-env-mcp，需要在本地常驻一个持有连接的进程，以后再定。</figcaption>
+    </figure>
+    <details>
+      <summary>注册命令（方式 B）</summary>
+      <pre><code># 工作站：pi-env-mcp 里已经 add 并 trust 过主机 miyabi-g
+pi-env-mcp mcp add miyabi-pbs --host miyabi-g -- \
+  &lt;path&gt;/miyabi-mcp/bin/miyabi-mcp serve --project &lt;project&gt; \
+  --notifier &lt;工作站名&gt; --local-launcher &lt;本机 bin/miyabi-mcp&gt; --remote-alias miyabi-g
+
+# agent 只注册 pi-env-mcp；工具名是 mcp__miyabi-g__miyabi_pbs__&lt;工具&gt;
+claude mcp add --scope user miyabi-g -- pi-env-mcp serve --host miyabi-g</code></pre>
+      <ul>
+        <li>在 pi-env-mcp 的配置里给这一项加 <code>"timeout": 300</code>，<code>mcp add</code> 没有对应的参数。</li>
+        <li>不要给这一项设 <code>--description</code>：pi-env-mcp 会用它整个替换服务端的 instructions。</li>
+        <li><code>--project</code> 要写明：托管时服务端的工作目录是主机配置的 cwd 或远端 home，推断不出项目。</li>
+        <li><code>--remote-alias</code> 同时是 pi-env-mcp 里的主机名和 <code>~/.ssh/config</code> 里的别名，所以两者要同名。</li>
+      </ul>
+    </details>
+  </section>
+
+  <section id="tools">
+    <div class="kick"><p class="ve-label caps">工具</p><h2>一半工具只读；只有 job_cancel 是破坏性的</h2></div>
+    <p class="body">所有工具都接受可选的 <code>project</code> 参数。每个工具都有对应的 CLI 子命令，输入相同，输出同一份 JSON，所以只有 shell 的 agent 也能用。</p>
+    <figure>
+      <div class="frame tools">
+        <div class="tg"><p class="ve-label">查询</p><ul>
+          <li class="tool ro"><code>pbs_context</code><span>主机、平面、停机时间、策略摘要</span></li>
+          <li class="tool ro"><code>pbs_queues</code><span>队列状态、项目上限、token 预算</span></li>
+          <li class="tool ro"><code>job_list</code><span>当前作业与有界历史</span></li>
+          <li class="tool ro"><code>job_get</code><span>详情、台账记录、日志尾部</span></li>
+        </ul></div>
+        <div class="tg"><p class="ve-label">提交与分配</p><ul>
+          <li class="tool wr"><code>job_submit</code><span>dry-run 出计划，凭摘要提交</span></li>
+          <li class="tool wr"><code>interactive_plan</code><span>交互分配的计划和终端参数</span></li>
+          <li class="tool ro"><code>allocation_check</code><span>在计算节点上核对分配</span></li>
+        </ul></div>
+        <div class="tg"><p class="ve-label">取消</p><ul>
+          <li class="tool de"><code>job_cancel</code><span>dry-run 列出目标，qdel 并记原因</span></li>
+        </ul></div>
+        <div class="tg"><p class="ve-label">等待与通知</p><ul>
+          <li class="tool ro"><code>job_wait</code><span>只给几分钟的短作业用的有界等待</span></li>
+          <li class="tool wr"><code>notify_create</code><span>为作业、队列或到期时间建通知</span></li>
+          <li class="tool wr"><code>notify_update</code><span>加入作业、封口、改投递目标</span></li>
+          <li class="tool ro"><code>notify_list</code><span>状态、daemon 心跳、启动命令</span></li>
+          <li class="tool wr"><code>notify_cancel</code><span>撤销，或关成 dismissed</span></li>
+          <li class="tool wr"><code>notify_ack</code><span>凭 token 确认收到</span></li>
+        </ul></div>
+        <div class="tg"><p class="ve-label">台账</p><ul>
+          <li class="tool ro"><code>ledger_query</code><span>统计、预算、增量导出</span></li>
+          <li class="tool wr"><code>job_annotate</code><span>标签、结论、接管外部作业</span></li>
+        </ul></div>
+        <p class="legend"><span><span class="mk ro"></span>readOnlyHint · 8</span><span><span class="mk wr"></span>写台账或消耗预算 · 7</span><span><span class="mk de"></span>destructiveHint · 1</span></p>
+      </div>
+      <figcaption><span class="fig-n">Fig. 3</span>16 个工具按用途分组，形状标出 MCP 注解。客户端可以据此放行只读工具，在提交和取消前询问用户；托管时 pi-env-mcp 把注解原样转给 agent。</figcaption>
+    </figure>
+  </section>
+
+  <section id="code">
+    <div class="kick"><p class="ve-label caps">结构</p><h2>CLI 与 MCP 共用一套实现；只有 server.py 依赖 MCP SDK</h2></div>
+    <figure>
+      <div class="frame mods" role="img" aria-label="src/miyabi_mcp 下 20 个模块共 5,569 行：接口 545 行，PBS 815 行，提交与策略 1,332 行，台账与查询 837 行，通知 1,501 行，公共 539 行。只有 server.py（98 行）导入 MCP SDK。">
+        <div class="mg"><p class="ve-label"><b>接口</b> · 545 行</p>
+          <div class="hb m"><span><code>server.py</code></span><span class="track"><span class="bar hot" style="--v:.125"></span><span class="hv">98</span></span><span class="hd">MCP stdio，官方 SDK 的低层 Server</span></div>
+          <div class="hb m"><span><code>tools.py</code></span><span class="track"><span class="bar" style="--v:.305"></span><span class="hv">240</span></span><span class="hd">16 个工具的 schema、注解和处理函数</span></div>
+          <div class="hb m"><span><code>cli.py</code></span><span class="track"><span class="bar" style="--v:.263"></span><span class="hv">207</span></span><span class="hd">子命令与 JSON 输出；serve、notify、notifyd</span></div>
+        </div>
+        <div class="mg"><p class="ve-label"><b>PBS</b> · 815 行</p>
+          <div class="hb m"><span><code>parse.py</code></span><span class="track"><span class="bar" style="--v:.375"></span><span class="hv">295</span></span><span class="hd">qstat 方言与站点命令；看不懂就失败，不当成空</span></div>
+          <div class="hb m"><span><code>observe.py</code></span><span class="track"><span class="bar" style="--v:.266"></span><span class="hv">209</span></span><span class="hd">共享 qstat 快照；状态变化 → 事件</span></div>
+          <div class="hb m"><span><code>states.py</code></span><span class="track"><span class="bar" style="--v:.165"></span><span class="hv">130</span></span><span class="hd">PBS 事实 → 状态、结果、用量</span></div>
+          <div class="hb m"><span><code>pbs.py</code></span><span class="track"><span class="bar" style="--v:.145"></span><span class="hv">114</span></span><span class="hd">固定命令：argv、绝对路径、超时</span></div>
+          <div class="hb m"><span><code>context.py</code></span><span class="track"><span class="bar" style="--v:.085"></span><span class="hv">67</span></span><span class="hd">主机与分配的证据</span></div>
+        </div>
+        <div class="mg"><p class="ve-label"><b>提交与策略</b> · 1,332 行</p>
+          <div class="hb m"><span><code>submit.py</code></span><span class="track"><span class="bar" style="--v:1"></span><span class="hv">786</span></span><span class="hd">计划、摘要、qsub、对账</span></div>
+          <div class="hb m"><span><code>interactive.py</code></span><span class="track"><span class="bar" style="--v:.352"></span><span class="hv">277</span></span><span class="hd">交互分配；PTY 内运行 qsub -I</span></div>
+          <div class="hb m"><span><code>policy.py</code></span><span class="track"><span class="bar" style="--v:.342"></span><span class="hv">269</span></span><span class="hd">三层上限与项目 budget</span></div>
+        </div>
+        <div class="mg"><p class="ve-label"><b>台账与查询</b> · 837 行</p>
+          <div class="hb m"><span><code>jobs.py</code></span><span class="track"><span class="bar" style="--v:.637"></span><span class="hv">501</span></span><span class="hd">查询、取消、注解、台账查询</span></div>
+          <div class="hb m"><span><code>ledger.py</code></span><span class="track"><span class="bar" style="--v:.370"></span><span class="hv">291</span></span><span class="hd">记录、事件、用户级索引</span></div>
+          <div class="hb m"><span><code>export.py</code></span><span class="track"><span class="bar" style="--v:.057"></span><span class="hv">45</span></span><span class="hd">只由已存事件生成的导出</span></div>
+        </div>
+        <div class="mg"><p class="ve-label"><b>通知</b> · 1,501 行</p>
+          <div class="hb m"><span><code>notify.py</code></span><span class="track"><span class="bar" style="--v:.999"></span><span class="hv">785</span></span><span class="hd">作业组、封口、条件、待投递消息</span></div>
+          <div class="hb m"><span><code>notifyd.py</code></span><span class="track"><span class="bar" style="--v:.678"></span><span class="hv">533</span></span><span class="hd">agent 所在机器上的 daemon 与 listener</span></div>
+          <div class="hb m"><span><code>deliver.py</code></span><span class="track"><span class="bar" style="--v:.233"></span><span class="hv">183</span></span><span class="hd">本机投递适配器</span></div>
+        </div>
+        <div class="mg"><p class="ve-label"><b>公共</b> · 539 行</p>
+          <div class="hb m"><span><code>util.py</code></span><span class="track"><span class="bar" style="--v:.355"></span><span class="hv">279</span></span><span class="hd">错误、时间、JSON、摘要、原子写、跨节点锁</span></div>
+          <div class="hb m"><span><code>config.py</code></span><span class="track"><span class="bar" style="--v:.251"></span><span class="hv">197</span></span><span class="hd">用户、组、项目目录、站点命令路径</span></div>
+          <div class="hb m"><span><code>version.py</code></span><span class="track"><span class="bar" style="--v:.080"></span><span class="hv">63</span></span><span class="hd">运行中的版本与提交</span></div>
+        </div>
+      </div>
+      <figcaption><span class="fig-n">Fig. 4</span>20 个模块约 5,600 行，条长是行数。核心只用标准库，CLI 和 notifyd 不导入 MCP SDK，所以只有 shell 的 agent、工作站上的 daemon 和以后在计算节点上运行的部分都能用。</figcaption>
+    </figure>
+  </section>
+
+  <section id="submit">
+    <div class="kick"><p class="ve-label caps">提交</p><h2>提交分两步：先出计划，再凭摘要提交</h2></div>
+    <p class="body">写操作出错时一律拒绝（fail closed）：先计划后提交，有策略上限和幂等键，结果不确定时先对账，再决定是否重试。</p>
+    <figure>
+      <div class="frame">
+        <svg class="ve-svg" viewBox="0 0 960 620" role="img" aria-label="提交时序。第一步：agent 以 dry-run 调用 job_submit，服务端逐项检查，把计划写进台账的 plans 目录，返回计划和 plan_digest。第二步，10 分钟内：agent 带摘要再次调用；服务端在提交锁内查 request_key，重算计划并比对摘要，再取提交锁，复查实时上限，写 submitting 记录和脚本快照，以 argv 运行 qsub，拿到作业号后写链接、索引、键文件和 submitted 事件，加入通知，释放锁，返回作业号。">
+        <path class="ve-life" d="M110 58V608M380 58V608M640 64V608M870 58V608"/>
+        <path class="ve-e" d="M110 100H380"/><text class="ve-el" x="245" y="91">job_submit(dry_run)</text>
+        <path class="ve-e" d="M380 126H420V150H384"/><text class="ve-el r" x="428" y="143">检查 pass / warn / fail</text>
+        <path class="ve-e" d="M380 184H640"/><text class="ve-el" x="510" y="175">plans/&lt;plan&gt;.json</text>
+        <path class="ve-e" d="M380 214H110"/><text class="ve-el" x="245" y="205">计划 + plan_digest</text>
+        <g class="ve-note"><rect x="124" y="230" width="200" height="46" rx="4"/><text x="224" y="244">用户在权限提示里</text><text x="224" y="262">看到完整参数</text></g>
+
+        <path class="ve-e is-hot" d="M110 300H380"/><text class="ve-el" x="245" y="291">job_submit(plan_digest)</text>
+        <path class="ve-e" d="M380 330H640"/><text class="ve-el" x="510" y="321">锁内查 request_key</text>
+        <path class="ve-e" d="M380 350H420V374H384"/><text class="ve-el r" x="428" y="367">重算计划，比对摘要</text>
+        <path class="ve-e" d="M380 404H640"/><text class="ve-el" x="510" y="395">取提交锁 · 复查上限</text>
+        <path class="ve-e" d="M380 434H640"/><text class="ve-el" x="510" y="425">记录 submitting · 快照</text>
+        <path class="ve-e is-hot" d="M380 464H870"/><text class="ve-el" x="755" y="455">qsub（argv，60&#160;s 超时）</text>
+        <path class="ve-e" d="M870 494H380"/><text class="ve-el" x="755" y="485">1234567.opbs</text>
+        <path class="ve-e" d="M380 524H640"/><text class="ve-el" x="510" y="515">链接 · 索引 · 键文件 · 事件</text>
+        <path class="ve-e" d="M380 554H640"/><text class="ve-el" x="510" y="545">加入通知 · 释放锁</text>
+        <path class="ve-e" d="M380 590H110"/><text class="ve-el" x="245" y="581">job_id · 日志路径 · 下一步</text>
+
+        <g class="ve-note l"><rect x="672" y="508" width="268" height="72" rx="4"/><text x="686" y="526">qsub 超时或输出无法解析：</text><text x="686" y="544">记为 submit_uncertain，</text><text x="686" y="562">按 MIYABI_SUBMIT_ID 对账</text></g>
+
+        <g class="ve-dim is-key"><path class="ext" d="M110 214H88M110 300H88"/><path class="ln" d="M96 214V300M92 218l8-8M92 304l8-8"/><text class="v" x="84" y="257">≤ 10 分钟</text></g>
+        <g class="ve-dim"><path class="ext" d="M380 404H352M380 554H352"/><path class="ln" d="M360 404V554M356 408l8-8M356 558l8-8"/><text class="v" x="350" y="479">提交锁约 1–2&#160;s</text></g>
+        <g class="ve-co" transform="translate(56 100)"><circle r="11"/><text>1</text></g>
+        <g class="ve-co" transform="translate(56 300)"><circle r="11"/><text>2</text></g>
+
+        <g class="ve-n" transform="translate(40 14)"><rect class="sh" width="140" height="44" rx="4"/><text x="70" y="22">agent</text></g>
+        <g class="ve-n" transform="translate(290 14)"><rect class="sh" width="180" height="44" rx="4"/><text x="90" y="22">miyabi-mcp</text></g>
+        <g class="ve-n" transform="translate(550 14)"><path class="sh" d="M0 8V42A90 8 0 0 0 180 42V8"/><ellipse class="sh lid" cx="90" cy="8" rx="90" ry="8"/><text x="90" y="28">台账 · /work</text></g>
+        <g class="ve-n" transform="translate(800 14)"><rect class="sh" width="140" height="44" rx="4"/><path class="gl" transform="translate(12 14)" d="M0 2h16v12H0zM5 2v12M9 2v12M13 2v12"/><text x="76" y="22">PBS</text></g>
+      </svg>
+      </div>
+      <ol class="co-notes">
+        <li><span class="co">1</span><span>dry-run 是默认值：只校验，把计划写进 <code>plans/</code>，返回 <code>plan_digest</code>，什么也不提交。</span></li>
+        <li><span class="co">2</span><span>commit：同样的参数加 <code>dry_run=false</code> 和摘要。带 <code>request_key</code> 时先查键，已提交过就直接返回原作业，计划过期也一样。</span></li>
+      </ol>
+      <figcaption><span class="fig-n">Fig. 5</span>commit 时服务端重算计划并比对摘要，所以提交的就是用户看过的那份；复查上限、qsub 和记账在同一把用户级锁里完成。</figcaption>
+    </figure>
+
+    <figure>
+      <div class="frame checks">
+        <div><span class="chip risk">fail · 拦下 commit</span>
+          <ul class="ck risk">
+            <li>队列不是 ENABLE、START 的顶层队列，或 walltime 超过 MAX_ELAPSE</li>
+            <li><code>select</code> 里写了 <code>vnode</code><small>节点和 MIG 切片由 PBS 分配，不能指定</small></li>
+            <li>MIG 队列要 3 个实例<small>每个节点只有 1、2 或 4 个实例</small></li>
+            <li>数组作业：<code>array</code> 或 <code>#PBS -J</code><small>预算和用量只会按一个子作业计算；改为分别提交，用通知分组等待</small></li>
+            <li>脚本 <code>bash -n</code> 不通过，或残留 <code>&lt;占位符&gt;</code><small>整行注释不查；<code>#PBS</code> 行和首行 <code>#!</code> 照查</small></li>
+            <li>输出路径在 <code>/tmp</code></li>
+            <li>超过 <code>--limit</code> 余量、每作业上限、时间窗或 <code>budget</code></li>
+            <li>计划已过期或摘要不符</li>
+          </ul></div>
+        <div><span class="chip warn">warn · 写进计划</span>
+          <ul class="ck warn">
+            <li>walltime 超过 REMAIN_ELAPSE<small>停机前不会开始；策略可以改为 fail</small></li>
+            <li><code>select</code> 里有未确认的资源名</li>
+            <li><code>#PBS</code> 指令被命令行覆盖，且两边的值不同</li>
+            <li>脚本里没有 <code>cd</code><small>批处理作业从 <code>$HOME</code> 开始，<code>workdir</code> 只决定 <code>$PBS_O_WORKDIR</code></small></li>
+            <li>输出路径在 <code>/home</code></li>
+            <li>带 <code>depend</code><small><code>afterok</code> 链曾经断过；建议用通知分组</small></li>
+            <li>声明了版本绑定，代码目录却仍可写</li>
+            <li><code>request_key</code> 已经提交过<small>commit 返回原作业。用 fail 会诱使 agent 换新键，提交出第二个作业</small></li>
+            <li>预计用量到 <code>budget</code> 的 <code>warn_at</code></li>
+          </ul></div>
+      </div>
+      <figcaption><span class="fig-n">Fig. 6</span>每项检查给出 pass、warn 或 fail。任何一项 fail 都会拦下 commit；warn 写进计划，不拦提交。</figcaption>
+    </figure>
+  </section>
+
+  <section id="ledger">
+    <div class="kick"><p class="ve-label caps">台账</p><h2>PBS 是事实来源，台账是缓存和意图日志</h2></div>
+    <p class="body">每个作业一份 JSON 记录，另有按月追加的事件日志。<b>不用 SQLite</b>：几台登录节点上可能同时有多个写者。记录用原子 rename 替换；锁是 Lustre 上的 flock，在登录节点之间一致，持锁进程退出时自动释放。</p>
+    <figure>
+      <div class="frame fmap">
+        <div><h3>&lt;project&gt;/.miyabi-mcp/</h3><ul>
+          <li><code>submissions/<wbr>&lt;submit_id&gt;/<wbr>record.json</code><span class="d">作业记录<span class="tag">原子替换</span></span></li>
+          <li><code>submissions/<wbr>&lt;submit_id&gt;/<wbr>script.sh</code><span class="d">提交时的脚本快照</span></li>
+          <li><code>jobs/&lt;num&gt;</code><span class="d">指向 submissions/… 的链接，按作业号查找</span></li>
+          <li><code>events/&lt;YYYY-MM&gt;.jsonl</code><span class="d">本项目所有作业的事件<span class="tag">只追加</span></span></li>
+          <li><code>requests/&lt;key-digest&gt;.json</code><span class="d">幂等键 → 作业，在项目内唯一</span></li>
+          <li><code>plans/&lt;plan&gt;.json</code><span class="d">dry-run 计划<span class="tag">10 分钟</span></span></li>
+          <li><code>notifications/&lt;id&gt;.json</code><span class="d">成员、封口、条件、投递状态</span></li>
+          <li><code>logs/</code><span class="d">默认的 PBS 输出（<code>-o</code>）</span></li>
+          <li><span><code>policy.json</code> · <code>project.json</code></span><span class="d">本项目的份额、上限和默认设置</span></li>
+          <li><code>locks/</code><span class="d">作业锁与通知锁<span class="tag">flock</span></span></li>
+        </ul><p>目录为 700，内含一个内容为 <code>*</code> 的 <code>.gitignore</code>。</p></div>
+        <div><h3>/work/&lt;group&gt;/&lt;user&gt;/.miyabi-mcp/</h3><ul>
+          <li><code>config.json</code><span class="d">命令路径、轮询间隔、具名投递命令</span></li>
+          <li><code>policy.json</code><span class="d">各项目的默认值；跨项目的合计上限</span></li>
+          <li><code>cache/active.json</code><span class="d">共享的 <code>qstat -ll</code> 快照<span class="tag">可删除</span></span></li>
+          <li><code>cache/accepted.json</code><span class="d">最近一次 qsub 被接受的时间</span></li>
+          <li><code>index/&lt;YYYY-MM&gt;.jsonl</code><span class="d">作业 → 项目的索引<span class="tag">可重建</span></span></li>
+          <li><code>projects.json</code><span class="d">已知的项目目录</span></li>
+          <li><code>locks/submit</code><span class="d">用户级提交锁<span class="tag">flock</span></span></li>
+          <li><code>notifiers/&lt;名&gt;.json</code><span class="d">各 daemon 的心跳与退出报告</span></li>
+          <li><code>notifyd/</code><span class="d">daemon 在登录节点上运行时的本机状态</span></li>
+        </ul></div>
+        <div><h3>~/.local/state/miyabi-mcp/notifyd/</h3><ul>
+          <li><code>&lt;notifier&gt;.log</code><span class="d">每行一个 JSON：启动、退出、每次投递</span></li>
+          <li><span>锁与 pid 文件</span><span class="d">每台机器、每个用户只有一个 daemon</span></li>
+          <li><span>收件目录</span><span class="d">listener 从这里取消息；通知关闭满 7 天后删除</span></li>
+        </ul><p>在工作站上；前缀是 <code>${XDG_STATE_HOME:-<wbr>~/.local/state}</code>。</p></div>
+      </div>
+      <figcaption><span class="fig-n">Fig. 7</span>一个项目的记录都在它自己的 <code>.miyabi-mcp/</code> 里，随项目归档或删除；跨项目的索引、快照和提交锁在用户级目录。Miyabi 的 <code>$HOME</code> 下什么都不写。</figcaption>
+    </figure>
+
+    <figure>
+      <div class="frame">
+        <svg class="ve-svg" viewBox="0 0 960 440" role="img" aria-label="状态映射：submitted 经 qstat 确认进入 queued（PBS 字母 Q、W、T、H），开始后为 running（R、E、B），离开活动表后为 ended（F）。活动表和历史都查不到满 300 秒记为 unknown；qsub 结果不确定时记为 submit_uncertain，按 MIYABI_SUBMIT_ID 对账。ended 的 outcome 按 Exit_status：小于 0 为 failed，本服务取消过则为 cancelled，walltime 超限实测为 −29；0 为 success；1 到 255 为 failed；256 及以上是 256 加信号编号，本服务取消过为 cancelled，否则为 failed，实测 qdel 交互作业为 265、运行中的批处理作业为 271；FINISH 但没有开始时间为 cancelled。">
+          <path class="ve-e" d="M200 74H260"/><text class="ve-el" x="230" y="65">确认</text>
+          <path class="ve-e" d="M440 74H500"/><text class="ve-el" x="470" y="65">开始</text>
+          <path class="ve-e" d="M680 74H740"/><text class="ve-el" x="710" y="65">结束</text>
+          <path class="ve-e is-async" d="M350 108V178H380"/>
+          <path class="ve-e is-async" d="M590 108V178H580"/>
+          <text class="ve-el r" x="600" y="140">活动表与历史都查不到</text>
+          <path class="ve-e" d="M110 150V108"/><text class="ve-el r" x="120" y="132">按 SUBMIT_ID 对账</text>
+          <path class="ann" d="M900 108V282"/>
+
+          <g class="ve-n" transform="translate(20 40)"><rect class="sh" width="180" height="68" rx="4"/><text x="90" y="24">submitted</text><text class="sub" x="90" y="48">qsub 接受</text></g>
+          <g class="ve-n" transform="translate(260 40)"><rect class="sh" width="180" height="68" rx="4"/><text x="90" y="21">queued</text>
+            <g class="lt"><rect x="37" y="36" width="22" height="22" rx="3"/><text x="48" y="47">Q</text></g><g class="lt"><rect x="65" y="36" width="22" height="22" rx="3"/><text x="76" y="47">W</text></g><g class="lt"><rect x="93" y="36" width="22" height="22" rx="3"/><text x="104" y="47">T</text></g><g class="lt"><rect x="121" y="36" width="22" height="22" rx="3"/><text x="132" y="47">H</text></g></g>
+          <g class="ve-n" transform="translate(500 40)"><rect class="sh" width="180" height="68" rx="4"/><text x="90" y="21">running</text>
+            <g class="lt"><rect x="51" y="36" width="22" height="22" rx="3"/><text x="62" y="47">R</text></g><g class="lt"><rect x="79" y="36" width="22" height="22" rx="3"/><text x="90" y="47">E</text></g><g class="lt"><rect x="107" y="36" width="22" height="22" rx="3"/><text x="118" y="47">B</text></g></g>
+          <g class="ve-n" transform="translate(740 40)"><rect class="sh" width="200" height="68" rx="4"/><text x="100" y="21">ended</text>
+            <g class="lt"><rect x="89" y="36" width="22" height="22" rx="3"/><text x="100" y="47">F</text></g></g>
+          <g class="ve-n is-off" transform="translate(380 150)"><rect class="sh" width="200" height="56" rx="4"/><text x="100" y="20">unknown</text><text class="sub" x="100" y="40">查不到满 300&#160;s</text></g>
+          <g class="ve-n is-off" transform="translate(20 150)"><rect class="sh" width="180" height="56" rx="4"/><text x="90" y="20">submit_uncertain</text><text class="sub" x="90" y="40">没拿到作业号</text></g>
+
+          <text class="ve-lab" x="20" y="252">ended 的 outcome，按 Exit_status（刻度不连续）</text>
+          <text class="ve-lab c" x="125" y="278">&lt; 0</text>
+          <text class="ve-lab c" x="290" y="278">0</text>
+          <text class="ve-lab c" x="455" y="278">1–255</text>
+          <text class="ve-lab c" x="760" y="278">≥ 256 = 256 + 信号编号</text>
+          <rect class="band info" x="20" y="286" width="210" height="18" rx="2"/><text class="bt" x="125" y="295">取消过：cancelled</text>
+          <rect class="band risk" x="20" y="304" width="210" height="18" rx="2"/><text class="bt" x="125" y="313">否则：failed</text>
+          <rect class="band ok" x="250" y="286" width="80" height="36" rx="2"/><text class="bt" x="290" y="304">success</text>
+          <rect class="band risk" x="350" y="286" width="210" height="36" rx="2"/><text class="bt" x="455" y="304">failed</text>
+          <rect class="band info" x="580" y="286" width="360" height="18" rx="2"/><text class="bt" x="760" y="295">本服务取消过：cancelled</text>
+          <rect class="band risk" x="580" y="304" width="360" height="18" rx="2"/><text class="bt" x="760" y="313">否则：failed</text>
+          <path class="tick" d="M79 322V342M290 322V342M356 322V342M660 322V342M706 322V342"/>
+          <text class="ve-lab c" x="79" y="358">−29 walltime 超限</text>
+          <text class="ve-lab e" x="286" y="358">0 正常退出</text>
+          <text class="ve-lab" x="360" y="358">1 脚本失败</text>
+          <text class="ve-lab e" x="656" y="358">265 qdel 交互作业</text>
+          <text class="ve-lab" x="710" y="358">271 qdel 运行中作业</text>
+          <rect class="band info" x="20" y="402" width="18" height="18" rx="2"/>
+          <text class="ve-lab" x="48" y="416">FINISH 但没有开始时间：cancelled，从未运行（排队或 HELD 时被删除）</text>
+        </svg>
+      </div>
+      <figcaption><span class="fig-n">Fig. 8</span>FINISH 不等于成功，Exit_status=0 也只表示 PBS 层面正常退出。PBS 原值留在 <code>raw_state</code>，判断有误时追加带证据的 <code>reconciled</code> 事件；图中数值都是 Miyabi 上的实测。</figcaption>
+    </figure>
+
+    <figure>
+      <div class="frame">
+        <svg class="ve-svg" viewBox="0 0 960 240" role="img" aria-label="左：qsub 接受后的 120 秒宽限期内也查历史，但只认状态 F，查不到不计 missing；之后在活动表和历史里都查不到满 300 秒，才记为 unknown。右：agent 的调用在 t1 开始查询，查到 held；notifyd 在较晚的 t2 开始查询，查到 running 并先写入；agent 的结果后写入，因为 t1 早于 t2 而被丢弃。">
+          <text class="ve-lab" x="20" y="28">qsub 之后</text>
+          <path class="axis" d="M40 150H460"/>
+          <path class="tick" d="M50 144V156"/>
+          <g class="ve-dim is-key"><path class="ext" d="M50 144V108M146 150V108"/><path class="ln" d="M50 114H146M46 118l8-8M142 118l8-8"/><text x="98" y="106">宽限 120&#160;s</text></g>
+          <g class="ve-dim"><path class="ext" d="M386 142V108"/><path class="ln" d="M146 114H386M382 118l8-8"/><text x="266" y="106">missing_s 300&#160;s</text></g>
+          <path class="dia" d="M386 142l8 8-8 8-8-8z"/>
+          <text class="ve-lab" x="44" y="178">qsub 接受</text>
+          <text class="ve-lab c" x="386" y="178">记为 unknown</text>
+          <text class="ve-lab" x="44" y="208">宽限内也查历史，但只认 F；查不到不计 missing</text>
+
+          <text class="ve-lab" x="500" y="28">两次刷新重叠</text>
+          <path class="axis" d="M520 200H940"/>
+          <path class="guide" d="M560 84V200M620 144V200"/>
+          <path class="obs" d="M560 80H800"/><circle class="qs" cx="560" cy="80" r="4"/><path class="ve-x" d="M794 74l12 12M806 74l-12 12"/>
+          <path class="obs" d="M620 140H740"/><circle class="qs" cx="620" cy="140" r="4"/><rect class="wr" x="735" y="135" width="10" height="10" rx="1"/>
+          <text class="ve-lab" x="560" y="64">agent 的调用：查到 held</text>
+          <text class="ve-lab" x="620" y="124">notifyd：查到 running</text>
+          <text class="ve-lab" x="754" y="145">先写入</text>
+          <text class="ve-lab" x="816" y="85">后写入 · 丢弃</text>
+          <text class="ve-lab c" x="560" y="222">t₁</text>
+          <text class="ve-lab c" x="620" y="222">t₂ &gt; t₁</text>
+          <text class="ve-lab e" x="940" y="222">查询开始的时间</text>
+        </svg>
+      </div>
+      <figcaption><span class="fig-n">Fig. 9</span>状态只按证据前进。刚提交的作业有宽限期，不会被误记为丢失；两次刷新重叠时，按查询开始的时间（<code>observed_ts</code>）取较新的那次，状态不会从 running 退回 held。</figcaption>
+    </figure>
+  </section>
+
+  <section id="limits">
+    <div class="kick"><p class="ve-label caps">上限</p><h2>每次提交都在一把锁里过三层上限</h2></div>
+    <p class="body">多个项目同时跑是常态。PBS 的项目上限和 token 预算按组计，由组内所有项目、所有用户共享，所以上限分组、用户、项目三层。上限只用于检查，永远不作为申请的 walltime。</p>
+    <figure>
+      <div class="frame">
+        <svg class="ve-svg" viewBox="0 0 960 250" role="img" aria-label="commit 进入用户级提交锁后依次检查三层上限：组（PBS --limit 的实时余量，扣除保留槽位）、用户（全部项目的活动作业和时间窗内的 node·h，来自索引和活动表）、项目（份额、每作业上限、标签并发和 budget，来自项目台账）；全部通过才运行 qsub，持锁约 1 到 2 秒。">
+          <rect class="ve-b" x="150" y="24" width="670" height="176" rx="4"/>
+          <text class="ve-bt" x="164" y="50">用户级提交锁 · locks/submit</text>
+          <path class="ve-e" d="M126 130H178"/>
+          <path class="ve-e" d="M358 130H398"/>
+          <path class="ve-e" d="M578 130H618"/>
+          <path class="ve-e is-hot" d="M798 130H846"/>
+          <g class="ve-n" transform="translate(16 100)"><rect class="sh" width="110" height="60" rx="4"/><text x="55" y="30">commit</text></g>
+          <g class="ve-n" transform="translate(178 70)"><rect class="sh" width="180" height="118" rx="4"/><text x="90" y="24">组</text><text class="sub" x="90" y="52">--limit 实时余量</text><text class="sub" x="90" y="74">扣保留槽位</text><text class="src" x="90" y="100">PBS 实时</text></g>
+          <g class="ve-n" transform="translate(398 70)"><rect class="sh" width="180" height="118" rx="4"/><text x="90" y="24">用户</text><text class="sub" x="90" y="52">全部项目的活动作业</text><text class="sub" x="90" y="74">时间窗 node·h</text><text class="src" x="90" y="100">索引 + 活动表</text></g>
+          <g class="ve-n" transform="translate(618 70)"><rect class="sh" width="180" height="118" rx="4"/><text x="90" y="24">项目</text><text class="sub" x="90" y="52">份额 · 每作业上限</text><text class="sub" x="90" y="74">标签并发 · budget</text><text class="src" x="90" y="100">项目台账</text></g>
+          <g class="ve-n" transform="translate(846 100)"><rect class="sh" width="100" height="60" rx="4"/><path class="gl" transform="translate(10 10)" d="M0 2h16v12H0zM5 2v12M9 2v12M13 2v12"/><text x="56" y="30">qsub</text></g>
+          <g class="ve-dim is-key"><path class="ext" d="M150 200V230M820 200V230"/><path class="ln" d="M150 224H820M146 228l8-8M816 228l8-8"/><text x="485" y="218">持锁约 1–2&#160;s</text></g>
+        </svg>
+      </div>
+      <figcaption><span class="fig-n">Fig. 10</span>组的余量是 PBS 的实时事实（Miyabi-G 每个项目组 128 accepted、16 running），已经算上组内其他用户和不经 miyabi-mcp 提交的作业。检查和 qsub 在同一把锁里，两个项目同时提交时不会都通过同一个余量。</figcaption>
+    </figure>
+
+    <figure id="budget">
+      <div class="frame">
+        <svg class="ve-svg" viewBox="0 0 960 150" role="img" aria-label="示意：limit 200 node·h，已结束作业实测 120，未结束作业预留 30，本次请求 16，预计 166，到 limit 的 83%，给出 warn。">
+          <path class="tk warn" d="M616 44V112"/><text class="ve-lab c" x="616" y="34">warn_at 80 % · 160</text>
+          <path class="tk risk" d="M760 44V112"/><text class="ve-lab c" x="760" y="34">limit 200</text>
+          <rect class="seg m" x="40" y="58" width="432" height="40" rx="2"/>
+          <rect class="seg r" x="472" y="58" width="108" height="40"/>
+          <rect class="seg q" x="580" y="58" width="57.6" height="40" rx="2"/>
+          <text class="segt" x="256" y="78">已结束 · 实测 120</text>
+          <text class="segt" x="526" y="78">预留 30</text>
+          <path class="axis" d="M40 112H904"/>
+          <text class="ve-lab" x="40" y="134">0 node·h</text>
+          <text class="ve-lab c qt" x="608.8" y="134">本次 16</text>
+        </svg>
+        <p class="readout"><span class="chip warn">warn</span><span>预计 <b class="pv">166</b> node·h，是 limit 的 <b class="pf">83</b> %：<span class="pw">给出 warn，提交照常；要继续加额度由用户提高 limit</span></span></p>
+      </div>
+      <div class="side">
+        <p class="ve-label">一个真实项目（bypass-lora）· MIG 实例·h</p>
+        <div class="hbars" role="img" aria-label="bypass-lora 项目：累加申请 279.03 MIG 实例·小时，实测 152.99">
+          <div class="hb"><span>累加申请量</span><span class="track"><span class="bar" style="--v:1"></span><span class="hv">279.03</span></span></div>
+          <div class="hb"><span>已结束作业的实测</span><span class="track"><span class="bar hot" style="--v:.548"></span><span class="hv">152.99</span></span></div>
+        </div>
+      </div>
+      <figcaption><span class="fig-n">Fig. 11</span>项目 budget = 已结束作业的实测 + 未结束作业的预留 + 本次请求。到 warn_at（默认 80 %）提醒，超过 limit 时 dry-run 和 commit 都拦下；拖动滑块试试（示意数字）。只累加申请量会高估：一个真实项目高估了 82 %。</figcaption>
+    </figure>
+  </section>
+
+  <section id="notify">
+    <div class="kick"><p class="ve-label caps">通知</p><h2>判定在登录节点，投递在 agent 所在的机器</h2></div>
+    <p class="body">agent 等作业时可能正在做别的事，也可能已经结束回合，所以这里叫“通知”，不叫“唤醒”。agent 每次登记或加入通知后，都运行返回的命令；<code>notifyd ensure</code> 是幂等的，不以“已在运行”为由跳过。</p>
+    <figure class="ve-steps">
+      <div class="frame">
+        <svg class="ve-svg" viewBox="0 0 960 320" role="img" aria-label="一个通知等三个 seed：seed-1 带 notify 提交，通知 open；seed-2、seed-3 加入后成员满 3 个，自动封口；seed-3 失败时先发一条不带 token 的提前失败消息；三个都结束后通知 fired；notifyd 下一次 poll 取走最终消息，写入本机收件目录，状态 delivered；agent 用 token 确认，状态 acknowledged。投递失败 5 次标为 failed，改投递目标后回到 fired；未触发的通知可以撤销为 cancelled；送达未确认的可以关成 dismissed。">
+          <rect class="ve-b" x="30" y="14" width="330" height="80" rx="4"/>
+          <text class="ve-bt" x="44" y="36">成员 · expected = 3</text>
+          <rect class="slot" x="50" y="48" width="92" height="32" rx="3"/>
+          <rect class="slot" x="152" y="48" width="92" height="32" rx="3"/>
+          <rect class="slot" x="254" y="48" width="92" height="32" rx="3"/>
+          <rect class="jb" data-s="1" x="50" y="48" width="92" height="32" rx="3"/>
+          <rect class="jb" data-s="2" x="152" y="48" width="92" height="32" rx="3"/>
+          <rect class="jb" data-s="2" x="254" y="48" width="92" height="32" rx="3"/>
+          <rect class="ve-at jf ok" data-s="4 5 6 7" x="50" y="48" width="92" height="32" rx="3"/>
+          <rect class="ve-at jf ok" data-s="4 5 6 7" x="152" y="48" width="92" height="32" rx="3"/>
+          <rect class="ve-at jf risk" data-s="3 4 5 6 7" x="254" y="48" width="92" height="32" rx="3"/>
+          <g class="ve-vals"><text class="jt" data-s="1" x="96" y="64">seed-1 Q</text><text class="jt" data-s="3" x="96" y="64">seed-1 R</text><text class="jt" data-s="4" x="96" y="64">seed-1 F 0</text></g>
+          <g class="ve-vals"><text class="jt" data-s="2" x="198" y="64">seed-2 Q</text><text class="jt" data-s="3" x="198" y="64">seed-2 R</text><text class="jt" data-s="4" x="198" y="64">seed-2 F 0</text></g>
+          <g class="ve-vals"><text class="jt" data-s="2" x="300" y="64">seed-3 Q</text><text class="jt" data-s="3" x="300" y="64">seed-3 F 1</text></g>
+
+          <g class="ve-at msg" data-s="3"><rect x="400" y="32" width="530" height="44" rx="4"/><path d="M414 46h22v16h-22zM414 46l11 9 11-9"/><text x="448" y="54">提前失败消息：seed-3 失败，不带 token；组继续等</text></g>
+          <g class="ve-at msg" data-s="5"><rect x="400" y="32" width="530" height="44" rx="4"/><path d="M414 46h22v16h-22zM414 46l11 9 11-9"/><text x="448" y="54">最终消息写进本机收件目录，带 ack token</text></g>
+          <g class="ve-at msg" data-s="6"><rect x="400" y="32" width="530" height="44" rx="4"/><path d="M414 54l6 6 12-13"/><text x="448" y="54">agent 调用 notify_ack(id, ack_token)</text></g>
+
+          <path class="ve-e" data-s="0 2" d="M180 148H225"/><text class="ve-el" data-s="0 2" x="202" y="139">封口</text>
+          <path class="ve-e" data-s="0 4" d="M365 148H410"/><text class="ve-el" data-s="0 4" x="387" y="139">满足</text>
+          <path class="ve-e" data-s="0 5" d="M550 148H595"/><text class="ve-el" data-s="0 5" x="572" y="139">投递</text>
+          <path class="ve-e" data-s="0 6" d="M735 148H780"/><text class="ve-el" data-s="0 6" x="757" y="139">ack</text>
+          <path class="ve-e" d="M110 176V260H225"/><text class="ve-el l" x="102" y="226">撤销</text>
+          <path class="ve-e" d="M295 176V236"/>
+          <path class="ve-e" d="M460 176V236"/><text class="ve-el l" x="452" y="212">5 次失败</text>
+          <path class="ve-e" d="M500 236V176"/><text class="ve-el r" x="508" y="212">改投递目标</text>
+          <path class="ve-e" d="M665 176V236"/><text class="ve-el r" x="673" y="212">notify_cancel</text>
+
+          <circle class="ve-tok" data-s="1" r="5" style="offset-path: path('M96 64V148')"/>
+          <circle class="ve-tok" data-s="2" r="5" style="offset-path: path('M110 148H295')"/>
+          <circle class="ve-tok" data-s="4" r="5" style="offset-path: path('M295 148H480')"/>
+          <circle class="ve-tok" data-s="5" r="5" style="offset-path: path('M480 148H665')"/>
+          <circle class="ve-tok" data-s="6" r="5" style="offset-path: path('M665 148H850')"/>
+
+          <g class="ve-n" data-s="0 1" transform="translate(40 120)"><rect class="sh" width="140" height="56" rx="4"/><text x="70" y="28">open</text></g>
+          <g class="ve-n" data-s="0 2 3" transform="translate(225 120)"><rect class="sh" width="140" height="56" rx="4"/><text x="70" y="28">sealed</text></g>
+          <g class="ve-n" data-s="0 4" transform="translate(410 120)"><rect class="sh" width="140" height="56" rx="4"/><text x="70" y="28">fired</text></g>
+          <g class="ve-n" data-s="0 5" transform="translate(595 120)"><rect class="sh" width="140" height="56" rx="4"/><text x="70" y="28">delivered</text></g>
+          <g class="ve-n" data-s="0 6" transform="translate(780 120)"><rect class="sh" width="140" height="56" rx="4"/><text x="70" y="28">acknowledged</text></g>
+          <g class="ve-n" transform="translate(225 236)"><rect class="sh" width="140" height="48" rx="4"/><text x="70" y="24">cancelled</text></g>
+          <g class="ve-n is-off" transform="translate(410 236)"><rect class="sh" width="140" height="48" rx="4"/><text x="70" y="24">failed</text></g>
+          <g class="ve-n" transform="translate(595 236)"><rect class="sh" width="140" height="48" rx="4"/><text x="70" y="24">dismissed</text></g>
+        </svg>
+      </div>
+      <div class="ve-player">
+        <ol class="ve-cap">
+          <li data-n="1/7">seed-1 提交时带 <code>notify</code>（<code>expected=3</code>）：按名字建通知，状态 open。</li>
+          <li data-n="2/7">seed-2、seed-3 加入同名通知；成员满 3 个，自动封口（sealed）。</li>
+          <li data-n="3/7">seed-3 以 Exit_status=1 结束：先发一条提前失败消息，不带 token，组通知继续等。</li>
+          <li data-n="4/7">三个都结束，<code>all_ended</code> 成立：通知 fired。</li>
+          <li data-n="5/7">notifyd 下一次 poll 取走最终消息，写进本机收件目录：delivered，listener 退出。</li>
+          <li data-n="6/7">agent 检查输出，再用最终消息里的 token 调用 <code>notify_ack</code>：acknowledged。</li>
+          <li data-n="7/7">全貌：投递失败 5 次标为 failed，改投递目标后回到 fired；未触发的可以撤销，送达未确认的可以关成 dismissed。</li>
+        </ol>
+        <button data-go="-1" aria-label="上一步">←</button>
+        <button data-play>播放</button>
+        <input type="range" min="0" value="0" aria-label="步骤">
+        <button data-go="1" aria-label="下一步">→</button>
+      </div>
+      <figcaption><span class="fig-n">Fig. 12</span>一个通知等一组作业，全部结束后只发一条汇总。封口之前不会按 all_ended 触发，所以第一个 seed 结束时不会误报；只有最终消息带 ack token。</figcaption>
+    </figure>
+
+    <figure>
+      <div class="cases">
+        <div class="case" data-st="ok"><span class="chip ok">正常</span><h3>作业结束后，下一次 poll 就送达</h3>
+          <svg class="ve-mini" viewBox="0 0 260 100" role="img" aria-label="notifyd 每 180 秒 poll 一次；作业在两次 poll 之间结束，下一次 poll 判定并送达，最多晚一个间隔">
+            <path class="axis" d="M10 72H250"/>
+            <circle class="pm" cx="10" cy="72" r="3.5"/><circle class="pm" cx="40" cy="72" r="3.5"/><circle class="pm" cx="70" cy="72" r="3.5"/><circle class="pm" cx="100" cy="72" r="3.5"/><circle class="pm is-st" cx="130" cy="72" r="5"/><circle class="pm" cx="160" cy="72" r="3.5"/><circle class="pm" cx="190" cy="72" r="3.5"/><circle class="pm" cx="220" cy="72" r="3.5"/><circle class="pm" cx="250" cy="72" r="3.5"/>
+            <path class="mk" d="M99 55h10l-5 9z"/>
+            <g class="ve-dim is-st"><path class="ext" d="M104 54V38M130 66V38"/><path class="ln" d="M104 44H130M100 48l8-8M126 48l8-8"/><text x="117" y="34">≤ 180&#160;s</text></g>
+            <text class="ml e" x="100" y="94">作业结束</text><text class="ml" x="134" y="94">送达</text>
+          </svg></div>
+        <div class="case" data-st="warn"><span class="chip warn">退避</span><h3>poll 失败：间隔翻倍，3 轮后报中断</h3>
+          <svg class="ve-mini" viewBox="0 0 260 100" role="img" aria-label="poll 失败后等 2 倍间隔再试，再失败等 4 倍；连续 3 轮出问题时，向已知的通知目标发一条通知通道中断的消息">
+            <path class="axis" d="M10 72H250"/>
+            <circle class="pm" cx="10" cy="72" r="3.5"/>
+            <path class="ve-x" d="M36 68l8 8M44 68l-8 8M96 68l8 8M104 68l-8 8"/><path class="ve-x" d="M215 67l10 10M225 67l-10 10" style="stroke: var(--st)"/>
+            <g class="ve-dim"><path class="ext" d="M40 64V38M100 64V38M220 64V38"/><path class="ln" d="M40 44H220M36 48l8-8M96 48l8-8M216 48l8-8"/><text x="70" y="34">2×</text><text x="160" y="34">4×</text></g>
+            <text class="ml c" x="40" y="94">失败</text><text class="ml e" x="226" y="94">第 3 轮：发通道中断消息</text>
+          </svg></div>
+        <div class="case" data-st="info"><span class="chip info">空闲退出</span><h3>没有通知可等：再 poll 2 次就退出</h3>
+          <svg class="ve-mini" viewBox="0 0 260 100" role="img" aria-label="最后一个通知关闭后，daemon 再 poll 两次并报告退出，然后自行退出；之后有新的通知登记时，ensure 重新启动它">
+            <path class="axis" d="M10 72H250"/>
+            <circle class="pm" cx="10" cy="72" r="3.5"/><circle class="pm" cx="40" cy="72" r="3.5"/><circle class="pm" cx="70" cy="72" r="3.5"/><rect class="pm is-st" x="95" y="67" width="10" height="10" rx="1"/><circle class="pm" cx="200" cy="72" r="3.5"/><circle class="pm" cx="230" cy="72" r="3.5"/>
+            <path class="mk" d="M50 55h10l-5 9z"/><path class="mk" d="M195 55h10l-5 9z"/>
+            <g class="ve-dim is-st"><path class="ext" d="M55 54V38M100 64V38"/><path class="ln" d="M55 44H100M51 48l8-8M96 48l8-8"/><text x="78" y="34">空闲 2 次</text></g>
+            <text class="ml e" x="55" y="94">已关闭</text><text class="ml" x="104" y="94">退出</text><text class="ml c" x="200" y="94">ensure</text>
+          </svg></div>
+        <div class="case" data-st="risk"><span class="chip risk">stale</span><h3>被 kill -9：心跳超时，判为 stale</h3>
+          <svg class="ve-mini" viewBox="0 0 260 100" role="img" aria-label="daemon 被 kill -9 后不再 poll；两个间隔加 60 秒内没有心跳，服务端判它为 stale，有未完成通知时给出提示">
+            <path class="axis" d="M10 72H250"/>
+            <circle class="pm" cx="10" cy="72" r="3.5"/><circle class="pm" cx="40" cy="72" r="3.5"/><circle class="pm" cx="70" cy="72" r="3.5"/>
+            <path class="ve-x" d="M76 68l8 8M84 68l-8 8"/><rect class="pm is-st" x="135" y="67" width="10" height="10" rx="1"/>
+            <g class="ve-dim is-st"><path class="ext" d="M70 64V38M140 64V38"/><path class="ln" d="M70 44H140M66 48l8-8M136 48l8-8"/><text x="105" y="34">2 个间隔 + 60&#160;s</text></g>
+            <text class="ml c" x="80" y="94">kill -9</text><text class="ml" x="146" y="94">stale</text>
+          </svg></div>
+      </div>
+      <figcaption><span class="fig-n">Fig. 13</span>notifyd 每 180 s poll 一次（图中每格 180 s），共享快照最长用 60 s 前的。出问题时不会静默：退避，连续 3 轮就报中断；daemon 空闲时自己退出，不留常驻进程。</figcaption>
+    </figure>
+
+    <figure>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>投递方式</th><th>机制</th><th>适用</th><th>在线实测</th></tr></thead>
+          <tbody>
+            <tr><td><code>listener</code>（默认）</td><td>daemon 把消息写进本机收件目录；agent 在后台运行 <code>listen_command</code>，收到消息就退出，退出提示就是通知</td><td>Claude Code</td><td><span class="chip ok">已实测</span></td></tr>
+            <tr><td><code>herdr</code></td><td><code>herdr agent prompt &lt;agent&gt;</code>；登记时 ensure 检查这个 agent 是否存在</td><td>herdr 中的 TUI agent</td><td><span class="chip warn">联测用过</span></td></tr>
+            <tr><td><code>codex_queue</code></td><td><code>codex queue --thread …</code>，用本机的 app-server</td><td>Codex</td><td><span class="chip info">待复验</span></td></tr>
+            <tr><td><code>tmux</code></td><td><code>tmux send-keys -l</code>，再按 Enter</td><td>tmux 中的 agent</td><td><span class="chip plain">未实测</span></td></tr>
+            <tr><td><code>command</code></td><td>运行 <code>config.json</code> 里具名的命令，消息 JSON 从 stdin 传入</td><td>自定义</td><td><span class="chip plain">未实测</span></td></tr>
+            <tr><td><code>file</code></td><td>追加到本机的一个文件</td><td>轮询或其他系统</td><td><span class="chip plain">未实测</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <figcaption><span class="fig-n">Fig. 14</span>投递做成适配器，在 agent 所在的机器上运行。一个通知只有一个接收方：listener 的收件目录先到先得，协调者用 notify_list 看状态，不开 listener。codex_queue 的旧实现实测过 21 次，要在新版 Codex 上复验。</figcaption>
+    </figure>
+  </section>
+
+  <section id="hosting">
+    <div class="kick"><p class="ve-label caps">托管</p><h2>托管有四条约束，都在 miyabi-g1 上实测过</h2></div>
+    <figure>
+      <div class="kpis">
+        <div class="kpi"><span class="ve-label">一条 ssh 主连接的会话上限</span><span class="val"><span data-count="10">10</span><span class="unit"> 个</span></span>
+          <svg class="ve-slots" viewBox="0 0 250 52" role="img" aria-label="主连接上已有 1 个会话时再同时开 11 个：9 个成功，2 个被拒，上限 10 个">
+            <rect class="c-old" x="0" y="4" width="16" height="16" rx="2"/>
+            <rect class="c-ok" x="20" y="4" width="16" height="16" rx="2"/><rect class="c-ok" x="40" y="4" width="16" height="16" rx="2"/><rect class="c-ok" x="60" y="4" width="16" height="16" rx="2"/><rect class="c-ok" x="80" y="4" width="16" height="16" rx="2"/><rect class="c-ok" x="100" y="4" width="16" height="16" rx="2"/><rect class="c-ok" x="120" y="4" width="16" height="16" rx="2"/><rect class="c-ok" x="140" y="4" width="16" height="16" rx="2"/><rect class="c-ok" x="160" y="4" width="16" height="16" rx="2"/><rect class="c-ok" x="180" y="4" width="16" height="16" rx="2"/>
+            <path class="lim" d="M198 0V24"/>
+            <rect class="c-no" x="202" y="4" width="16" height="16" rx="2"/><path class="ve-x" d="M206 8l8 8M214 8l-8 8"/>
+            <rect class="c-no" x="222" y="4" width="16" height="16" rx="2"/><path class="ve-x" d="M226 8l8 8M234 8l-8 8"/>
+            <text x="0" y="40">已有 1 + 成功 9</text><text x="202" y="40">被拒 2</text>
+          </svg></div>
+        <div class="kpi"><span class="ve-label">INSTRUCTIONS 长度</span><span class="val"><span data-count="1784">1,784</span><span class="unit"> / 2,000 字符</span></span>
+          <svg class="ve-bars" viewBox="0 0 250 30" role="img" aria-label="服务端的 instructions 有 1,784 个字符；pi-env-mcp 只把前 2,000 个字符给 agent">
+            <rect class="hot" x="0" y="6" width="178.4" height="14" rx="2"/><path class="lim" d="M200 0V26"/><text x="204" y="13">2,000</text>
+          </svg></div>
+        <div class="kpi"><span class="ve-label">托管请求的超时（建议设置）</span><span class="val"><span data-count="300">300</span><span class="unit"> s</span></span>
+          <svg class="ve-bars" viewBox="0 0 250 80" role="img" aria-label="pi-env-mcp 默认等 60 秒，收到 progress 时重新计时；job_wait 最多 45 秒，每 10 秒发一次 progress；其他工具不发 progress，所以这一项设为 300 秒">
+            <text y="12">默认</text><rect x="72" y="5" width="26" height="14" rx="2"/><text x="106" y="12">60 s</text>
+            <text y="40">job_wait</text><rect x="72" y="33" width="19.5" height="14" rx="2"/><text x="99.5" y="40">≤ 45 s</text>
+            <text y="68">设为</text><rect class="hot" x="72" y="61" width="130" height="14" rx="2"/><text x="210" y="68">300 s</text>
+          </svg></div>
+        <div class="kpi"><span class="ve-label">关掉 stdin 后服务端退出</span><span class="val"><span data-count="0.11">0.11</span><span class="unit"> s</span></span>
+          <svg class="ve-bars" viewBox="0 0 250 80" role="img" aria-label="agent 退出时 pi-env-mcp 先关服务端的 stdin，2 秒后 kill；69f2f5a 之前进行中的 job_wait 要拖 8.6 秒，现在 0.11 秒退出">
+            <text y="12">改前</text><rect x="72" y="5" width="130" height="14" rx="2"/><text x="210" y="12">8.6 s</text>
+            <path class="lim" d="M102.2 0V52"/>
+            <text y="40">现在</text><rect class="hot" x="72" y="33" width="2" height="14" rx="1"/><text class="h" x="80" y="40">0.11 s</text>
+            <text class="h" x="106" y="68">2 s 后 kill</text>
+          </svg></div>
+      </div>
+      <figcaption><span class="fig-n">Fig. 15</span>四条约束都有余量：会话按 agent 计，托管的服务端不另占；instructions 在 2,000 字符内，由测试检查；超时设到 300 s；关闭时 job_wait 立即结束。数字来自 11 月 6 日经 pi-env-mcp 和假 PBS 的实测。</figcaption>
+    </figure>
+    <ul class="notes">
+      <li><b>会话满时，错误看起来像认证失败。</b>会话被拒后 ssh 改为直连，在 BatchMode 下登录不了，错误结尾是 <code>Permission denied (publickey)</code>。notifyd 隔 2 s、5 s 各重试一次，仍被拒就报 <code>ssh_sessions_full</code>，请用户关掉不用的 MCP 客户端。</li>
+      <li><b>超时的提交可能已经提交了。</b>pi-env-mcp 超时后发 <code>notifications/cancelled</code>：job_wait 随即结束，其他工具在后台线程里照常做完。用同一个 <code>request_key</code> 重试会拿回那个作业；没带键时先用 job_list 确认。</li>
+      <li><b>agent 看不到 serverInfo.version。</b><code>pbs_context.server.commit</code> 写出运行中的提交；checkout 前进后，每个结果都带 <code>server_note</code>，请 agent 重启 MCP 服务。</li>
+    </ul>
+  </section>
+
+  <section id="export">
+    <div class="kick"><p class="ve-label caps">导出</p><h2>导出逐字节稳定，smooth-research 可以直接去重</h2></div>
+    <figure>
+      <div class="frame">
+        <svg class="ve-svg" viewBox="0 0 960 280" role="img" aria-label="事件 ID 的结构：命名空间 miyabi-pbs（固定不改）、PBS 作业号、每个作业单调递增的 seq，它就是 smooth-research 的 record_id。导出流程：只追加的 events 文件，经 agent 所在机器上运行的 export_command 读出，写成键排序、紧凑分隔的 JSONL，再交给 rl run record 去重和排序。">
+          <text x="40" y="70" style="font: 600 30px var(--font-mono); fill: var(--text)">miyabi-pbs<tspan style="fill: var(--text-dim)">:</tspan>1234567.opbs<tspan style="fill: var(--text-dim)">:</tspan><tspan style="fill: var(--accent)">4</tspan></text>
+          <path class="ann" d="M40 86V94H220V86M238 86V94H454V86M472 86V94H490V86"/>
+          <text class="ve-lab c" x="130" y="120">命名空间，固定不改</text>
+          <text class="ve-lab c" x="346" y="120">PBS 作业号</text>
+          <text class="ve-lab" x="470" y="120">seq：每个作业单调递增</text>
+          <text x="560" y="62" style="font: 600 17px var(--font-body); fill: var(--text)">= smooth-research 的 record_id</text>
+          <text class="ve-lab" x="560" y="90">同一 ID 内容不同，即判为冲突</text>
+
+          <path class="ve-e" d="M190 218H270"/><text class="ve-el" x="230" y="209">读</text>
+          <path class="ve-e" d="M490 218H570"/><text class="ve-el" x="530" y="209">stdout</text>
+          <path class="ve-e" d="M750 218H810"/>
+          <g class="ve-n" transform="translate(20 184)"><path class="sh" d="M0 8V60A85 8 0 0 0 170 60V8"/><ellipse class="sh lid" cx="85" cy="8" rx="85" ry="8"/><text x="85" y="32">events/</text><text class="sub" x="85" y="52">只追加 JSONL</text></g>
+          <g class="ve-n is-key" transform="translate(270 190)"><rect class="sh" width="220" height="56" rx="4"/><text x="110" y="20">export_command</text><text class="sub" x="110" y="40">在 agent 的机器上运行</text></g>
+          <g class="ve-n" transform="translate(570 190)"><rect class="sh" width="180" height="56" rx="4"/><text x="90" y="20">observations.jsonl</text><text class="sub" x="90" y="40">键排序 · 紧凑</text></g>
+          <g class="ve-n" transform="translate(810 190)"><rect class="sh" width="134" height="56" rx="4"/><text x="67" y="20">rl run record</text><text class="sub" x="67" y="40">去重 · 排序</text></g>
+        </svg>
+      </div>
+      <figcaption><span class="fig-n">Fig. 16</span>导出只用事件里存下的字段，不掺入导出时的主机名或时间，所以同一个事件每次导出都相同。agent 只运行命令并重定向到文件，数据不经过模型转抄。</figcaption>
+    </figure>
+    <details>
+      <summary>Usage 的映射</summary>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>类别</th><th>unit</th><th>resource_type</th><th>hardware</th><th>basis</th><th>accounting_ref</th></tr></thead>
+          <tbody>
+            <tr><td>G 节点</td><td><code>node_hours</code></td><td><code>gpu_node</code></td><td>GH200</td><td>measured</td><td><code>miyabi-pbs:&lt;job_id&gt;</code></td></tr>
+            <tr><td>MIG 实例</td><td><code>mig_instance_hours</code></td><td><code>gpu_mig_instance</code></td><td>GH200 MIG</td><td>measured</td><td><code>miyabi-pbs:&lt;job_id&gt;</code></td></tr>
+            <tr><td>TOKEN（要求时）</td><td><code>miyabi_token</code></td><td><code>site_allocation</code></td><td>—</td><td>reported</td><td><code>miyabi-pbs:&lt;job_id&gt;:token</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <ul>
+        <li>只在 ended 且有 <code>resources_used.walltime</code> 时给出用量；缺数据不记，不写 0。数值在生成事件时定稿，保留 6 位小数。</li>
+        <li>MIG 切片由 PBS 分配，计费与切片无关，所以 hardware 不写规格。</li>
+        <li>只导出状态事件；<code>cancel_requested</code> 和 <code>annotated</code> 不导出。摘要用 <code>blake2b:&lt;hex&gt;</code>。</li>
+      </ul>
+    </details>
+  </section>
+
+  <section id="status">
+    <div class="kick"><p class="ve-label caps">状态</p><h2>v0.1 已在 Miyabi-G 上跑通；部分投递方式和 Miyabi-C 还没有实测</h2></div>
+    <div class="two">
+      <figure>
+        <ol class="tl">
+          <li><time>10-30</time><div><h3>调查与设计</h3><p>只读调查 miyabi-g 上的使用记录，写出设计草案。同日在 Miyabi-G 上实测查询、提交、取消和 Exit_status，工作站经 ssh 收到通知。</p></div></li>
+          <li><time>11-01</time><div><h3>交互分配</h3><p>经 pi-env-mcp 的终端跑通两次 interact-g 分配；第二次在分配内跑完测试，再用 job_cancel 取消。</p></div></li>
+          <li><time>11-05</time><div><h3>审查与修复</h3><p>锁改为 flock，加入项目 budget，daemon 有了状态和退出报告，导出格式定稿。</p></div></li>
+          <li class="now"><time>11-06</time><div><h3>pi-env-mcp 托管</h3><p>服务端由 pi-env-mcp 托管（69f2f5a），与 smooth-research、pi-env-mcp 联合测试；占位符规则放宽到不查注释（b54210f）。</p></div></li>
+        </ol>
+        <figcaption><span class="fig-n">Fig. 17</span>v0.1 一周内从设计走到托管实测，日期为 JST。</figcaption>
+      </figure>
+      <figure>
+        <div class="hbars" role="img" aria-label="离线测试共 129 个：test_flow 65，test_notify 37，test_parse 12，test_interactive 9，test_server 6">
+          <div class="hb"><span><code>test_flow</code></span><span class="track"><span class="bar" style="--v:1"></span><span class="hv">65</span></span></div>
+          <div class="hb"><span><code>test_notify</code></span><span class="track"><span class="bar" style="--v:.569"></span><span class="hv">37</span></span></div>
+          <div class="hb"><span><code>test_parse</code></span><span class="track"><span class="bar" style="--v:.185"></span><span class="hv">12</span></span></div>
+          <div class="hb"><span><code>test_interactive</code></span><span class="track"><span class="bar" style="--v:.138"></span><span class="hv">9</span></span></div>
+          <div class="hb"><span><code>test_server</code></span><span class="track"><span class="bar" style="--v:.092"></span><span class="hv">6</span></span></div>
+        </div>
+        <figcaption><span class="fig-n">Fig. 18</span>129 个离线测试用假 PBS（回放 miyabi-g1 上采集的匿名化输出）和假 ssh，不提交作业。b54210f 在本地和 miyabi-g1 的 /work 与 /tmp 上全部通过。</figcaption>
+      </figure>
+    </div>
+    <div class="callouts">
+      <div class="callout"><span class="chip info">未在线实测</span><p>herdr、tmux、codex_queue 投递（herdr 只在 11-06 联测中用过）；Miyabi-C；两台登录节点之间的锁；C 和 MIG 的交互分配；真实断线后的清理。</p></div>
+      <div class="callout"><span class="chip warn">待用户决定</span><p>是否在用户级 <code>policy.json</code> 设跨项目的合计上限（<code>user.max_active_jobs</code>、<code>user.budget_windows</code>）；notifyd 和 export_command 是否也改走 pi-env-mcp。</p></div>
+      <div class="callout"><span class="chip plain">路线图</span><p>v0.2：codex_goal 投递、作业内标记 hook、usage_report、hold 与 release、台账压缩。v0.3：pilot pool，即任务打包与预先占位排队。</p></div>
+    </div>
+  </section>
+
+  <section class="sources" aria-label="来源">
+    <p class="ve-label caps">来源</p>
+    <p><code>miyabi-mcp/DESIGN.md</code> §0–14 · <code>miyabi-mcp/README.md</code>（Status v0.1）· <code>src/miyabi_mcp/config.py:31–38</code> · <code>submit.py:39, 648–767</code> · <code>notify.py:31</code> · <code>notifyd.py:40–41, 90, 440</code> · <code>server.py:22</code> · <code>tools.py:65–218</code> · 提交 <code>b54210f</code>（2026-11-06）。站点实测数字都带日期，决策前请重新查。</p>
+  </section>
+
+</main>
+</div>
+
+<script>
+  const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // Linked highlighting: hovering any [data-ref], or focusing a prose term, lights every element that shares a ref.
+  const linked = [...document.querySelectorAll('[data-ref]')], refs = (el) => el.dataset.ref.split(' ');
+  let hovered = null, focused = null;
+  const paint = () => {
+    const keys = (hovered || focused)?.dataset.ref.split(' ') ?? [];
+    for (const t of linked) t.classList.toggle('is-lit', refs(t).some((k) => keys.includes(k)));
+    for (const svg of document.querySelectorAll('svg')) svg.classList.toggle('has-lit', !!svg.querySelector('.is-lit'));
+  };
+  for (const el of linked) {
+    el.addEventListener('pointerenter', () => { hovered = el; paint(); });
+    el.addEventListener('pointerleave', () => { hovered = null; paint(); });
+    el.addEventListener('focus', () => { focused = el; paint(); });
+    el.addEventListener('blur', () => { focused = null; paint(); });
+  }
+
+  // Stepper / scene player: opens on the full picture; Play replays from step 1.
+  for (const root of document.querySelectorAll('.ve-steps')) {
+    const parts = [...root.querySelectorAll('[data-s]')], caps = [...root.querySelectorAll('.ve-cap li')];
+    const range = root.querySelector('input[type=range]'), play = root.querySelector('[data-play]');
+    const n = caps.length; let i = 0, timer = null;
+    if (range) range.max = n - 1;
+    const show = (k) => {
+      i = Math.max(0, Math.min(n - 1, k));
+      root.classList.remove('is-still');
+      for (const el of parts) { const s = el.dataset.s.trim().split(' ').map(Number); el.classList.toggle('on', s[0] <= i + 1); el.classList.toggle('now', s.includes(i + 1)); }
+      caps.forEach((c, j) => c.hidden = j !== i);
+      root.classList.toggle('is-full', i === n - 1);
+      if (range) range.value = i;
+    };
+    const stop = () => { clearInterval(timer); timer = null; if (play) play.textContent = '播放'; };
+    root.addEventListener('click', (e) => { const b = e.target.closest('[data-go]'); if (b) { stop(); show(i + +b.dataset.go); } });
+    range?.addEventListener('input', () => { stop(); show(+range.value); });
+    play?.addEventListener('click', () => {
+      if (timer) return stop();
+      if (i === n - 1) show(0);
+      play.textContent = '暂停';
+      timer = setInterval(() => (i < n - 1 ? show(i + 1) : stop()), 3500);
+    });
+    show(n - 1);
+    root.classList.add('is-still');
+    addEventListener('beforeprint', () => { show(n - 1); root.classList.add('is-still'); });
+  }
+
+  // Table of contents: mark the section in view; in the top bar, keep its link visible.
+  const tocLinks = [...document.querySelectorAll('.toc a')], tocList = document.querySelector('.toc ol');
+  const narrow = matchMedia('(max-width: 999px)');
+  const spy = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      for (const a of tocLinks) {
+        const on = a.hash === '#' + e.target.id;
+        a.classList.toggle('is-on', on);
+        if (on) { a.setAttribute('aria-current', 'true'); if (narrow.matches) tocList.scrollTo({ left: a.offsetLeft - tocList.offsetLeft - 16, behavior: still ? 'auto' : 'smooth' }); }
+        else a.removeAttribute('aria-current');
+      }
+    }
+  }, { rootMargin: '-10% 0px -80% 0px' });
+  for (const a of tocLinks) { const t = document.getElementById(a.hash.slice(1)); if (t) spy.observe(t); }
+
+  // Live figure: the project budget. One pure model feeds the bar, the label and the sentence.
+  const budget = document.getElementById('budget');
+  if (budget) {
+    const LIMIT = 200, WARN = .8, MEASURED = 120, RESERVED = 30, K = 3.6, X0 = 40;
+    const model = (r) => { const p = MEASURED + RESERVED + r; return { p, f: p / LIMIT, st: p > LIMIT ? 'fail' : p >= WARN * LIMIT ? 'warn' : 'pass' }; };
+    const say = {
+      pass: ['ok', '通过，提交照常'],
+      warn: ['warn', '给出 warn，提交照常；要继续加额度由用户提高 limit'],
+      fail: ['risk', '超过 limit，dry-run 和 commit 都拦下'],
+    };
+    const q = budget.querySelector('.seg.q'), qt = budget.querySelector('.qt'), out = budget.querySelector('.readout');
+    const render = (r) => {
+      const m = model(r), x = X0 + (MEASURED + RESERVED) * K, w = r * K;
+      q.setAttribute('width', Math.max(w, .01));
+      qt.setAttribute('x', x + w / 2); qt.textContent = '本次 ' + r;
+      const chip = out.querySelector('.chip');
+      chip.className = 'chip ' + say[m.st][0]; chip.textContent = m.st;
+      out.querySelector('.pv').textContent = m.p;
+      out.querySelector('.pf').textContent = Math.round(m.f * 100);
+      out.querySelector('.pw').textContent = say[m.st][1];
+    };
+    const ctl = document.createElement('label');
+    ctl.className = 'ctl';
+    ctl.innerHTML = '本次请求 <input type="range" min="0" max="80" step="1" value="16"> <output>16</output>&nbsp;node·h';
+    out.before(ctl);
+    const input = ctl.querySelector('input'), shown = ctl.querySelector('output');
+    input.addEventListener('input', () => { shown.textContent = input.value; render(+input.value); });
+    render(16);
+  }
+
+  if (!still) {
+    // Entrance: each block rises in once; numbers count up and bars grow as it arrives.
+    document.documentElement.classList.add('js-motion');
+    const io = new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        if (!e.isIntersecting) continue;
+        io.unobserve(e.target); e.target.classList.add('in');
+        for (const el of e.target.querySelectorAll('[data-count]')) {
+          const end = +el.dataset.count, dp = (el.dataset.count.split('.')[1] || '').length, t0 = performance.now();
+          const step = (t) => {
+            const k = Math.min(1, (t - t0) / 900);
+            el.textContent = (end * (1 - (1 - k) ** 3)).toLocaleString('en-US', { minimumFractionDigits: dp, maximumFractionDigits: dp });
+            if (k < 1) requestAnimationFrame(step);
+          };
+          requestAnimationFrame(step);
+        }
+      }
+    }, { rootMargin: '0px 0px -10% 0px' });
+    for (const el of document.querySelectorAll('main > *')) io.observe(el);
+  }
+</script>
+</body>
+</html>
