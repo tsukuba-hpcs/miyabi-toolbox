@@ -440,6 +440,7 @@ miyabi-mcp/
 - **MIG 切片视作一样。** 切片由 PBS 分配，提交时不能指定（`select` 里的 `vnode` 会被 qsub 以 "Unknown Resource" 拒绝）。站点说明里 MIG#0–#2 是 32 SM、24 GB，MIG#3 是 26 SM、24 GB；11-05 对照 15 个作业，编号 0–2 是 2g.24gb，编号 3 是 1g.24gb。不同切片的算力和 BF16 数值可能不同，所以需要逐位一致的比较要放进同一个作业，规格要在作业内用 `nvidia-smi -L` 自测。计费与切片无关：批处理 MIG 每实例·小时 0.25 token，互动 MIG 不消耗 token。所以用量、预算和导出只按实例数和时间算，miyabi-mcp 不解析切片编号、不推断规格；MIG 队列的 dry-run 计划附一句固定说明（`plan.mig_slice`）。
 - **TOKEN 列。** 这是四舍五入后的站点记账值，单独记为 `reported`，与 node·h 分开，`accounting_ref` 也不同（11.2）。
 - **缺数据不补。** 没有 `resources_used.walltime`（从未开始，或历史已过期）就不记用量，不写 0。
+- **几秒的作业可能实测为 0。** PBS 按整秒、周期性地更新 `resources_used.walltime`，只跑几秒的作业可能报 `00:00:00`。这是 PBS 给出的实测值，照记为 0（basis 仍是 measured），不按开始和结束时间去推算。11-06 联合测试中，两个约 5 s 的 debug-mig 作业分别记为 0 和 1 s（0.000278 MIG 实例·h）。
 - **申请量分开记。** 申请量（nodes × walltime）记在 `submit.requested_node_hours`，与实际用量分开。
 
 ### 7.6 锁与写入

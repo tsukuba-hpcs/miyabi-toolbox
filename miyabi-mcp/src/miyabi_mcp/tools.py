@@ -38,9 +38,15 @@ class Tool:
 
 DELIVER = {"type": "object", "description": "How the daemon on your machine delivers the notification. method: "
            "listener (default; Claude Code runs daemon.listen_command in the background), herdr (agent, machine), "
-           "tmux (target), codex_queue (thread, remote), command (name configured on your machine), file (path).",
+           "tmux (target), codex_queue (thread, remote), command (name configured on your machine), file (path). "
+           "daemon.start_command checks the target on that machine and fails when it cannot be reached.",
            "properties": {"method": {"enum": ["listener", "herdr", "tmux", "codex_queue", "command", "file"]},
-                          "thread": STR, "remote": STR, "codex": STR, "agent": STR, "machine": STR, "target": STR,
+                          "thread": STR, "remote": STR, "codex": STR,
+                          "agent": {**STR, "description": "herdr: a live agent's unique name or the pane id that "
+                                    "hosts it (e.g. w5:p1), exactly as `herdr agent get <agent>` finds it on the "
+                                    "delivering machine; not a role name"},
+                          "machine": {**STR, "description": "herdr: a saved herdr machine profile (--machine)"},
+                          "target": {**STR, "description": "tmux: a pane target such as session:window.pane"},
                           "name": STR, "path": STR},
            "required": ["method"], "additionalProperties": False}
 NOTIFY_PROPERTIES = {
