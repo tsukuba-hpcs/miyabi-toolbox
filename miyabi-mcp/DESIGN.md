@@ -219,6 +219,9 @@ tool_timeout_sec = 120
 ### 5.4 连接与登录节点的注意事项
 
 - **BatchMode。** 主连接（ControlMaster）不在时服务起不来，用户要先 `ssh -fN miyabi-g`（与 pi-env-mcp 的 shareConnection 相同）。ControlPersist（这里是 8 h）是从最后一个会话断开时开始计时的。
+- **一条主连接最多同时 10 个会话。** 11-06 实测：主连接上已有 1 个会话时，再同时开 11 个，前 9 个成功，后 2 个被拒，ssh 报 `Session open refused by peer`（sshd 的 MaxSessions，默认值就是 10；Miyabi 的 sshd_config 普通用户读不到）。测试时把 ssh 的直连回退指向 127.0.0.1:9，没有对 Miyabi 发起登录。每个经 ssh 连到 Miyabi 的 MCP 客户端（miyabi-mcp serve、pi-env-mcp）运行期间都占一个；notifyd 的每次 poll、report 和 ensure 时的目标检查，以及 `export_command`，各占一个，但很快释放。
+  - 会话被拒后，ssh 会改为直接连接，而 BatchMode 下直接连接登录不了，所以错误的结尾是 `Permission denied (publickey)`，看起来像认证问题。11-06 联合测试 B 轮，两个协调者和各角色共开了约 8 个 MCP 会话，再加上 notifyd 和只读检查，`notifyd ensure` 的目标检查就因此失败了。
+  - notifyd 遇到被拒的会话时，若远端什么都没有执行（stdout 为空），隔 2 s、5 s 各重试一次；仍被拒时报 `ssh_sessions_full`，写明原因，并请用户关掉不再用的 MCP 客户端。此时"通道中断"的消息不再建议重开主连接，因为主连接还在，只是满了。
 - **多台登录节点。** 目前至少有 g1、g2、g3。同一主连接里的会话落在同一台，不同主连接可能落在另一台。台账、通知和轮询快照都在共享文件系统上；进程是否存活靠心跳文件判断，不靠 pid。
 - **一个项目用一台登录节点。** 建议同一个项目的 MCP 服务、notifyd 和命令行调用都在同一台登录节点上。这只是使用建议，不是正确性的前提：锁在登录节点之间一致（7.6），观测的先后按查询开始的时间判断（7.3），各节点的时钟由 NTP 同步。几台登录节点同时使用同一个项目没有实测。
 - **PATH。** 服务端用绝对路径调用 PBS 命令（`/usr/local/bin/qstat`、`/opt/pbs/bin/qsub` 等，可配置），不依赖 ssh 非登录 shell 的 PATH。

@@ -51,6 +51,12 @@ tool_timeout_sec = 120
 ```
 
 pi: `pi mcp add -l miyabi-pbs -- ssh -T -o BatchMode=yes miyabi-g <path>/bin/miyabi-mcp serve --project <project> …`.
+
+One ssh master connection to Miyabi carries at most 10 sessions at once. Every MCP client that reaches Miyabi
+through it (miyabi-mcp serve, pi-env-mcp) holds one for as long as it runs, and notifyd's polls take one
+briefly. Past that, ssh reports `Session open refused by peer` and then `Permission denied (publickey)`: its
+fallback to a direct connection cannot log in under BatchMode. Close MCP clients you no longer need. notifyd
+retries a refused session twice, then reports `ssh_sessions_full`.
 Agents that only have a shell (for example through pi-env-mcp's `bash`) use the CLI:
 `bin/miyabi-mcp --project-dir <dir> call <tool> '<json arguments>'` prints the same JSON as the tool.
 

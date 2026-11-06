@@ -82,21 +82,41 @@ def local_commands() -> dict:
 
 # -- talking to miyabi-mcp ----------------------------------------------------------------------------------------
 
+# ssh's master connection carries a limited number of sessions at once (sshd MaxSessions: on Miyabi the 11th was
+# refused, 11-06), and every MCP client that reaches Miyabi through it holds one while it runs. ssh then falls back
+# to a direct connection, which BatchMode cannot log in with, so the error ends in "Permission denied (publickey)".
+REFUSED = "Session open refused by peer"
+SESSIONS_FULL = "refused another session"
+SESSION_RETRY_S = (2.0, 5.0)  # a short session (a poll, a check) frees its place within seconds
+
+
 def _remote(opts: Options, args: list[str], timeout: float = 120) -> dict:
     ssh = os.environ.get("MIYABI_MCP_SSH", "ssh")
     # ssh hands the remote shell one command line: quote every argument (JSON outcomes contain quotes).
     command = shlex.join([opts.remote_launcher or "miyabi-mcp", *args])
     argv = [ssh, "-T", "-o", "BatchMode=yes", opts.remote, command]
-    try:
-        process = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False,
-                                 stdin=subprocess.DEVNULL)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise MiyabiError("transport", f"ssh to {opts.remote} failed: {exc}") from None
+    for wait in (*SESSION_RETRY_S, None):
+        try:
+            process = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False,
+                                     stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise MiyabiError("transport", f"ssh to {opts.remote} failed: {exc}") from None
+        refused = REFUSED in (process.stderr or "") and not process.stdout.strip()  # nothing ran remotely
+        if not refused or wait is None:
+            break
+        time.sleep(wait)
     try:
         data = json.loads(process.stdout.strip().splitlines()[-1])
     except (IndexError, ValueError):
-        raise MiyabiError("transport", f"ssh to {opts.remote} failed (exit {process.returncode}): "
-                          f"{(process.stderr or process.stdout).strip()[-500:]}") from None
+        detail = (process.stderr or process.stdout).strip()[-500:]
+        if refused:
+            raise MiyabiError("ssh_sessions_full", f"ssh to {opts.remote}: its master connection {SESSIONS_FULL} "
+                              f"({len(SESSION_RETRY_S) + 1} tries in {sum(SESSION_RETRY_S):.0f} s). One ssh connection "
+                              "to Miyabi carries at most 10 sessions at once, and every MCP client that reaches "
+                              "Miyabi through it (miyabi-mcp serve, pi-env-mcp) holds one while it runs: close the "
+                              "ones no longer needed. The master itself is fine; ssh's fallback to a direct "
+                              f"connection cannot log in under BatchMode. ssh said: {detail}") from None
+        raise MiyabiError("transport", f"ssh to {opts.remote} failed (exit {process.returncode}): {detail}") from None
     if not data.get("ok"):
         error = data.get("error") or {}
         raise MiyabiError(error.get("type", "remote_error"), error.get("message", "miyabi-mcp failed"))
@@ -260,9 +280,10 @@ def _log(paths: dict, **fields) -> None:
 
 def _broken(opts: Options, paths: dict, known: dict, error: str, commands: dict) -> None:
     """Tell every known target that notifications are not getting through."""
+    reopen = opts.remote and SESSIONS_FULL not in error  # a full master is running: reopening it does not help
     text = (f"[miyabi-mcp] notification channel broken on {opts.notifier}: {error}. Job notifications are not "
             f"being delivered; the daemon keeps retrying every {opts.poll_seconds} s. "
-            + (f"If ssh to {opts.remote} fails, reopen its master connection (ssh -fN {opts.remote}). " if opts.remote else "")
+            + (f"If ssh to {opts.remote} fails, reopen its master connection (ssh -fN {opts.remote}). " if reopen else "")
             + "Check jobs directly with job_list meanwhile.")
     stamp = int(time.time())
     for notification_id, target in known.items():

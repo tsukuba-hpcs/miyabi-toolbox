@@ -656,6 +656,52 @@ class DaemonErrorTests(NotifyCase):
         self.assertIn("hint", info)  # its notification is still open
 
 
+class SessionLimitTests(NotifyCase):
+    """The ssh master to Miyabi refuses an 11th session; ssh's direct fallback cannot log in (11-06 joint test)."""
+
+    def full_ssh(self, refusals: int):
+        """An ssh whose master refuses the first `refusals` sessions as a full one does, then runs the command."""
+        tries = self.project / "ssh-tries"
+        script = self.bin / "full-ssh"
+        script.write_text(
+            f"#!/bin/sh\nn=$(($(cat {tries} 2>/dev/null || echo 0) + 1)); echo $n > {tries}\n"
+            f"if [ $n -le {refusals} ]; then\n"
+            "  echo 'mux_client_request_session: session request failed: Session open refused by peer' >&2\n"
+            "  echo 'x10041@miyabi-g.jcahpc.jp: Permission denied (publickey).' >&2\n  exit 255\nfi\n"
+            'while [ "${1#-}" != "$1" ]; do [ "$1" = "-o" ] && shift; shift; done\nshift\nexec sh -c "$*"\n')
+        script.chmod(0o755)
+        os.environ["MIYABI_MCP_SSH"] = str(script)
+        self.addCleanup(os.environ.pop, "MIYABI_MCP_SSH", None)
+        patcher = mock.patch.object(notifyd, "SESSION_RETRY_S", (0.01, 0.01))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return tries
+
+    def options(self) -> notifyd.Options:
+        return notifyd.Options(notifier="laptop", remote="miyabi-g", remote_launcher=str(LAUNCHER))
+
+    def test_a_refused_session_is_tried_again(self):
+        tries = self.full_ssh(refusals=2)
+        inbox = self.project / "notes.jsonl"
+        self.submit(name="y", notify={"notifier": "laptop", "deliver": {"method": "file", "path": str(inbox)}})
+        self.assertEqual(notifyd.check_targets(self.options()), [])  # until 11-06: "not made: ... (publickey)"
+        self.assertEqual(tries.read_text().strip(), "3")
+
+    def test_a_full_master_is_named_and_not_to_be_reopened(self):
+        self.full_ssh(refusals=99)
+        with self.assertRaises(MiyabiError) as caught:
+            notifyd.targets(self.options())
+        self.assertEqual(caught.exception.kind, "ssh_sessions_full")
+        self.assertIn("at most 10 sessions", caught.exception.message)
+        inbox = self.project / "broken.jsonl"
+        notifyd.state_dir().mkdir(parents=True, exist_ok=True)
+        notifyd._broken(self.options(), notifyd._paths(self.options()), {"N-1": {"method": "file", "path": str(inbox)}},
+                        str(caught.exception), {})
+        message = json.loads(inbox.read_text().splitlines()[0])["message"]
+        self.assertIn("refused another session", message)
+        self.assertNotIn("reopen its master connection", message)  # it runs; it is full
+
+
 if __name__ == "__main__":
     import unittest
 
