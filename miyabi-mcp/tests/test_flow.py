@@ -168,11 +168,19 @@ class SubmitCheckTests(FakePbsCase):
         self.assertEqual(self.check(plan, "array")["status"], "fail")
         self.assertNotIn("script.directives", {c["id"] for c in plan["checks"]})  # nothing overrides -J or -r
 
-    def test_only_what_the_command_line_sets_is_reported_as_overridden(self):
-        self.script.write_text("#!/bin/bash\n#PBS -l walltime=01:00:00\n#PBS -m abe\necho hi\n")
+    def test_only_what_the_command_line_changes_is_reported_as_overridden(self):
+        self.script.write_text("#!/bin/bash\n#PBS -l walltime=01:00:00\n#PBS -m abe\n#PBS -W group_list=gtest\n"
+                               "#PBS -j oe\necho hi\n")
         detail = self.check(self.plan(), "script.directives")["detail"]
-        self.assertIn("-l walltime", detail)
+        self.assertIn("-l walltime walltime=01:00:00 (it gives walltime=00:10:00)", detail)
         self.assertNotIn("-m", detail)
+        self.assertNotIn("group_list", detail)  # the same value (11-06: every plan warned about it)
+        self.assertNotIn("-j", detail)
+        self.script.write_text("#!/bin/bash\n#PBS -W group_list=gtest\n#PBS -q debug-g\necho hi\n")
+        self.assertNotIn("script.directives", {c["id"] for c in self.plan()["checks"]})
+        self.script.write_text("#!/bin/bash\n#PBS -W group_list=gother\necho hi\n")
+        detail = self.check(self.plan(), "script.directives")["detail"]
+        self.assertIn("-W group_list group_list=gother (it gives group_list=gtest)", detail)
 
     def test_select_resources(self):
         vnode = self.plan(queue="debug-mig", select="1:mpiprocs=1:vnode=mg1112_mig3")

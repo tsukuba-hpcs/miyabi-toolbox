@@ -133,6 +133,21 @@ def directive_keys(arguments: list[str]) -> dict[str, str]:
     return keys
 
 
+def _overridden(plan: dict, found: dict[str, str], checks: Checks) -> None:
+    """Warn about the script's #PBS lines that the command line (build_argv) overrides with another value; the
+    same value changes nothing (11-06: every plan warned about a #PBS -W group_list equal to the project's)."""
+    given = {"-q": plan["queue"], "-N": plan["name"], "-l select": f"select={plan['select']}",
+             "-l walltime": f"walltime={plan['walltime']}", "-W group_list": f"group_list={plan['group']}"}
+    if not plan["interactive"]:
+        given.update({"-o": plan["output"] or "the default log", "-j": plan["join"]})
+    if plan.get("depend"):
+        given["-W depend"] = f"depend={plan['depend']}"
+    changed = [f"{key} {found[key]} (it gives {given[key]})" for key in sorted(found)
+               if key in given and found[key] != given[key]]
+    if changed:
+        checks.add("script.directives", "warn", "the command line overrides #PBS " + "; ".join(changed))
+
+
 def env_string(env: dict[str, str]) -> str:
     parts = []
     for name, value in env.items():
@@ -242,12 +257,6 @@ def build_plan(settings: Settings, store: Store, args: dict, policy: dict) -> tu
     elif placeholders:
         checks.add("script.placeholders", "warn", "allowed by caller: " + shown)
     found = directive_keys(directives(text))
-    # What build_argv puts on the command line, which wins over the script's #PBS lines.
-    given = {"-q", "-N", "-l select", "-l walltime", "-W group_list"} | ({"-o", "-j"} if not interactive else set()) \
-        | ({"-W depend"} if args.get("depend") else set())
-    overridden = sorted(key for key in found if key in given)
-    if overridden:
-        checks.add("script.directives", "warn", "the command line overrides #PBS " + ", ".join(overridden))
     if args.get("array") or "-J" in found:
         # One plan, budget window and reservation would count a single subjob of the whole array.
         checks.add("array", "fail", "array jobs (array, or #PBS -J in the script) are not supported: their requested "
@@ -380,6 +389,7 @@ def build_plan(settings: Settings, store: Store, args: dict, policy: dict) -> tu
         "client_ref": args.get("client_ref"), "request_key": args.get("request_key"),
         "expected_seconds": args.get("expected_seconds"), "note": args.get("note"), "notify": notify,
     }
+    _overridden(plan, found, checks)
     if route and route.get("mig"):
         plan["mig_slice"] = MIG_SLICE_NOTE
     plan["plan_digest"] = digest_json({key: plan[key] for key in STABLE})
