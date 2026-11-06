@@ -8,7 +8,7 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from . import __version__, config, context, export, observe, parse, policy as policies, states
+from . import __version__, config, context, export, notify, observe, parse, policy as policies, states
 from .config import Settings
 from .ledger import Store, host, index_append, index_owner, index_owners, job_num, submit_lock
 from .pbs import Completed, Pbs
@@ -198,6 +198,8 @@ def job_get(settings: Settings, args: dict) -> dict:
                  "project": owner, "ledger": _ledger_view(record),
                  "detail": states.detail_summary(fields) if fields else None,
                  "variables": {k: v for k, v in variables.items() if k.startswith("MIYABI_") or k in names}}
+        if store is not None and record and record.get("notifications") and owner == str(settings.project_dir):
+            entry["notifications"] = notify.brief(store, [record])  # status, and why a failed one failed
         if tail and fields:
             submission = (record or {}).get("submit") or {}
             path = submission.get("output") if submission.get("interactive") else entry["detail"].get("output_path")

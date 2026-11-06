@@ -321,21 +321,41 @@ def join(settings: Settings, store: Store, spec: dict, job_id: str) -> dict:
                                   open_count=_open_count(store, item["notifier"]))}
 
 
+def _retarget(item: dict, deliver: dict) -> None:
+    """Point a notification at another target. Messages still to deliver start their attempts afresh; the final
+    message of a failed notification is delivered again (failed -> fired)."""
+    item["deliver"] = deliver
+    for message in item["outbox"]:
+        if message["status"] == "pending":
+            message["attempts"] = 0
+    if item["status"] == "failed":
+        final = [m for m in item["outbox"] if m["kind"] == "final"]
+        final[-1].update(status="pending", attempts=0)
+        _transition(item, "fired")
+
+
 def update(settings: Settings, args: dict) -> dict:
     store = Store(settings)
     item = _load(store, args.get("id") or args.get("name") or "")
     added = _ledger_ids(store, list(args.get("add_job_ids") or []))
+    deliver = delivery.validate_shape(args["deliver"]) if args.get("deliver") is not None else None
+    others = bool(added or args.get("seal") or args.get("message") is not None)
 
     def change(current: dict) -> None:
+        if deliver is not None and not others and current["status"] in {"fired", "failed"}:
+            _retarget(current, deliver)  # fired: its message is due; failed: its message is given another go
+            return
         if current["status"] != "open":
             raise MiyabiError("invalid_state", f"notification is {current['status']}: only an open one takes jobs "
-                              "or changes; create a new one")
+                              "or changes (a fired or failed one takes only a new deliver); create a new one")
         if added and current["sealed"]:
             raise MiyabiError("sealed", "the notification is sealed")
         current["jobs"].extend(j for j in added if j not in current["jobs"])
         _seal_if_complete(current, explicit=bool(args.get("seal")))
         if args.get("message") is not None:
             current["message"] = args["message"]
+        if deliver is not None:
+            _retarget(current, deliver)
 
     item = _update(store, item["id"], change)
     _note_on_jobs(store, item, added)
@@ -346,6 +366,28 @@ def update(settings: Settings, args: dict) -> dict:
 def _view(item: dict) -> dict:
     return {k: item.get(k) for k in ("id", "name", "status", "sealed", "jobs", "expected", "when", "queue",
                                      "deadline", "early_failure", "notifier", "deliver", "message", "created_at")}
+
+
+def _delivery(item: dict) -> dict | None:
+    """The latest message's delivery: status, attempts and the last outcome with its error, if it was tried."""
+    if not item.get("outbox"):
+        return None
+    message = item["outbox"][-1]
+    view = {key: message.get(key) for key in ("msg_id", "kind", "status", "attempts")}
+    last = message.get("last_outcome")
+    if last:
+        view["last_outcome"] = {**last, "detail": str(last["detail"])[-300:]} if last.get("detail") else last
+    return view
+
+
+def _failure(item: dict) -> str | None:
+    """Why a failed notification's final message was given up."""
+    final = [m for m in item.get("outbox") or [] if m["kind"] == "final"]
+    if item.get("status") != "failed" or not final:
+        return None
+    last = final[-1].get("last_outcome") or {}
+    reason = " ".join(str(part) for part in (last.get("code"), last.get("detail")) if part) or last.get("status")
+    return f"{final[-1].get('attempts', 0)} delivery attempt(s), the last at {last.get('at')}: {reason}"
 
 
 def list_(settings: Settings, args: dict) -> dict:
@@ -359,7 +401,9 @@ def list_(settings: Settings, args: dict) -> dict:
     views = []
     for n in items:
         view = {**_view(n), "pending_messages": sum(1 for m in n["outbox"] if m["status"] == "pending"),
-                "fired_reason": (n.get("fired") or {}).get("reason")}
+                "fired_reason": (n.get("fired") or {}).get("reason"), "delivery": _delivery(n)}
+        if n["status"] == "failed":
+            view["failure"] = _failure(n)
         if n["status"] in OPEN and n["deliver"]["method"] == "listener":
             view["listen_command"] = listen_command(settings, n["notifier"], n["id"])
         if n["status"] in CLOSED:
@@ -499,6 +543,25 @@ def _projects(settings: Settings) -> list[Path]:
     if settings.project_dir:
         paths.add(settings.project_dir)
     return sorted(p for p in paths if (p / STATE_NAME / "notifications").is_dir())
+
+
+def targets(settings: Settings, notifier: str) -> dict:
+    """The open notifications `notifier` delivers and their targets, for `notifyd ensure` to check on its machine.
+
+    Unlike a poll it changes nothing: no heartbeat, no evaluation, no messages handed out.
+    """
+    check_notifier(notifier)
+    found, errors = [], []
+    for project in _projects(settings):
+        try:
+            items = [n for n in _all(Store(settings.with_project(str(project))).state)
+                     if n.get("notifier") == notifier and n["status"] in OPEN]
+        except MiyabiError as exc:
+            errors.append({"project": str(project), **exc.to_dict()})
+            continue
+        found += [{"id": n["id"], "name": n.get("name"), "project_dir": str(project), "status": n["status"],
+                   "deliver": n["deliver"]} for n in items]
+    return ok(notifier=notifier, notifications=found, errors=errors)
 
 
 def poll(settings: Settings, notifier: str, caller: str | None = None, *, interval: int | None = None,
@@ -653,18 +716,25 @@ def _closing_hint(item: dict) -> str:
                 text += f"; {what} was already sent for {', '.join(item[key])}"
         return text + f". Not needed any more? notify_cancel(id=\"{item['id']}\")"
     if status == "fired":
-        return (f"fired; the daemon of {item['notifier']} delivers it at its next poll. Already handled? "
+        tried = _delivery(item) or {}
+        last = tried.get("last_outcome") or {}
+        failing = (f"; {tried['attempts']} attempt(s) so far, the last: {last.get('status')} "
+                   f"{last.get('code') or ''} {last.get('detail') or ''}".rstrip()) if last else ""
+        return (f"fired; the daemon of {item['notifier']} delivers it at its next poll{failing}. Already handled? "
                 f"notify_cancel(id=\"{item['id']}\")")
     if status == "delivered":
         return (f"delivered to {item['notifier']} but not acknowledged: acknowledge it with the ack_token in its "
                 f"message, or close it without the token with notify_cancel(id=\"{item['id']}\") (recorded as "
                 "dismissed, not as an acknowledgment)")
     if status == "failed":
-        return "its delivery failed; see notify_list for the reason"
+        return (f"its final message was never delivered ({_failure(item)}). The jobs' results are in job_get. To "
+                f"have it delivered, fix the target: notify_update(id=\"{item['id']}\", deliver={{...}}), then run "
+                "daemon.start_command")
     return "closed; nothing to do"
 
 
-def _wait_notifications(store: Store, records: list[dict]) -> list[dict]:
+def brief(store: Store, records: list[dict]) -> list[dict]:
+    """The notifications of these ledger records: status, members and what to do next (job_wait, job_get)."""
     ids = list(dict.fromkeys(n for record in records for n in (record.get("notifications") or [])))
     result = []
     for notification_id in ids:
@@ -700,7 +770,7 @@ def job_wait(settings: Settings, args: dict, cancelled=lambda: False, progress=N
             if not met:
                 steps.append("not yet: for a long wait submit with notify and run its command")
             result = ok(met=met, waited_s=round(elapsed, 1), jobs=summary, next="; ".join(steps) or None)
-            notifications = _wait_notifications(store, records)
+            notifications = brief(store, records)
             if notifications:
                 result["notifications"] = notifications
             return result

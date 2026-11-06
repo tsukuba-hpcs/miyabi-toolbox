@@ -169,9 +169,11 @@ TOOLS = [
                            "additionalProperties": False}}),
          notify.create, read_only=False),
     Tool("notify_update", "Add jobs to or seal a notification",
-         "Add ledger jobs to an open notification, seal it (only sealed groups fire on all_ended), or change its "
-         "message. Identify it by id or name.",
-         schema({"id": STR, "name": STR, "add_job_ids": STRS, "seal": {"type": "boolean"}, "message": STR}),
+         "Add ledger jobs to an open notification, seal it (only sealed groups fire on all_ended), change its "
+         "message, or point it at another delivery target (deliver; also for a fired one, and a failed one is "
+         "delivered again). Identify it by id or name. Then run daemon.start_command: it checks the targets.",
+         schema({"id": STR, "name": STR, "add_job_ids": STRS, "seal": {"type": "boolean"}, "message": STR,
+                 "deliver": DELIVER}),
          notify.update, read_only=False),
     Tool("notify_list", "List notifications",
          "This project's notifications (status, sealing, members, pending messages, listen_command while open), a "

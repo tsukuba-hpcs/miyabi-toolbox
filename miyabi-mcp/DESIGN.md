@@ -646,7 +646,7 @@ runner 对可捕获的断开信号尝试取消自己的作业；终端不支持�
   ```
 
 - **`notify_create`**：为已提交的作业（`job_ids`，立即封口）、队列状态（`queue`）或到期时间（`timeout`）创建通知。
-- **`notify_update`**：加入作业（`add_job_ids`）、封口（`seal`）、修改 `message`。
+- **`notify_update`**：加入作业（`add_job_ids`）、封口（`seal`）、修改 `message`，或改投递目标（`deliver`）。只有 open 的通知能改前三项；`deliver` 对 open、fired 和 failed 的通知都能改：待投递的消息从头计算尝试次数，failed 的通知回到 fired，最终消息重新投递（9.6）。改完再运行一次 `start_command`，它会检查目标（9.3）。
 - **`notify_list`、`notify_cancel`、`notify_ack`**：`notify_ack(id, ack_token)` 中的 token 只出现在最终的通知消息里，用来证明确认来自收到通知的那个 agent。`notify_cancel` 撤销未完成的通知；对已送达未确认的通知，它把状态记为 `dismissed`，不需要 token，也不算确认。
 - 以上返回值都带 `daemon` 字段：notifier 的 `state`（9.3）、心跳、配置的间隔和启动命令 `start_command`；`deliver.method` 为 `listener` 时还带 `listen_command`。`notify_create` 和带 notify 的 `job_submit` 另有 `next`，写明这次要运行哪条命令：每次登记或加入后都运行，不以"已在运行"为由跳过。
 
@@ -698,7 +698,7 @@ Miyabi 登录节点（miyabi-mcp）                         agent 所在机器�
 
 | 命令 | 作用 |
 | --- | --- |
-| `notifyd ensure [--remote <alias>] [--notifier <名>] [--poll-seconds <s>]` | 未运行就在后台启动，并返回状态；agent 每次登记或加入通知后都运行。已在运行的 daemon 间隔不同时，结果写明它保持原间隔 |
+| `notifyd ensure [--remote <alias>] [--notifier <名>] [--poll-seconds <s>]` | 未运行就在后台启动，并返回状态；agent 每次登记或加入通知后都运行。已在运行的 daemon 间隔不同时，结果写明它保持原间隔。随后在本机检查这个 notifier 名下所有未完成通知的投递目标，有到不了的就报 `delivery_target_unreachable` 并以非零退出（见下） |
 | `notifyd run` | 前台运行（调试用） |
 | `notifyd status`、`notifyd stop` | 查看、停止 |
 
@@ -706,7 +706,8 @@ Miyabi 登录节点（miyabi-mcp）                         agent 所在机器�
 - **失败处理。** poll 失败后按 2、4、8 倍间隔退避。poll 成功但某个项目读不出来时，结果带 `errors`：这个项目的未完成通知在刷新作业之前就已计入 `open_count` 和 `targets`，所以这一轮不算空闲，daemon 只把 targets 合并进已知目标、不覆盖。连续 3 轮出问题（整次失败或带 errors）时，向上次已知的各通知目标投递一条"通知通道中断"的消息，说明原因和恢复方法（例如用 `ssh -fN miyabi-g` 重新打开主连接），不静默；一轮干净的 poll 后重新计数。
 - **心跳与状态。** 服务端在用户级目录的 `notifiers/<名>.json` 里记录：poll 的开始时间（`last_poll`）、最近一次没有 errors 的 poll 的时间（`last_ok`）、daemon 的实际间隔、本轮 errors，以及 daemon 报告的退出（时间、原因、实例）。`daemon_info` 据此给出 `state`：`running`（两个周期加 60 s 内有 poll，且这个实例之后没有报告退出）、`idle_exited`（空闲退出；没有未完成通知时是正常状态）、`stopped`（stop、SIGTERM 或异常退出）、`stale`（心跳超时：进程可能被 `kill -9`，或连接断了）、`never`。`daemon_running` 保留给旧调用方，只在 state 为 running 时为 true。只有这个 notifier 名下有未完成通知、而 state 不是 running 时才给出 `hint`；`notify_list` 的 `summary` 给出未完成数、已送达未确认数和各 daemon 的 state。（11-01 两个通知晚到约 20 分钟，起因是 daemon 空闲退出后，服务端按旧的"两个周期内有 poll"规则仍报告它在运行。）
 - **退出与交接。** daemon 决定空闲退出时，先把本机状态写成 `exiting` 并释放锁，再用 `notify poll --exiting idle` 报告。服务端先记下退出，再照常判定。这时又有了未完成通知（或报告发不出去）时，daemon 重新取锁继续运行；取不到锁说明新 daemon 已经接手，它就退出，不再写状态文件。所以新通知恰好在 daemon 最后一次 poll 期间登记时，不会两边都以为对方在管：ensure 不把 `exiting` 当作在运行，会启动新的 daemon。stop、SIGTERM 和意外异常同样报告（`stopped`、`error`）；被 `kill -9` 时按心跳超时判为 stale。工作站上的 daemon 经 ssh 调用同一个命令，两种拓扑一致。
-- **日志。** `<状态目录>/<notifier>.log` 每行一个 JSON：`started`（pid、host、间隔、启动方式 ensure、listen 或 run）、`exited`（原因、最近一次成功 poll 的时间）、`poll_errors`、`poll_failed`、`delivered`、`broken_notice`、`resumed`、`inbox_removed`。
+- **登记时检查目标。** 投递目标只有 agent 所在的机器才能检查，服务端只查格式。所以 `notifyd ensure`（agent 登记或加入通知后运行的 `start_command`）启动或确认 daemon 之后，用 `notify targets` 取回这个 notifier 名下未完成通知的目标（服务端不记心跳、不判定、不交出消息），在本机逐个检查：herdr 用 `herdr agent get`，找不到时列出现有的 agent；tmux 用 `display-message`；command 查本机配置；codex_queue 查 codex 是否安装。有到不了的目标时，命令以 `delivery_target_unreachable` 失败，写明是哪个通知、什么原因、怎么改（`notify_update(deliver=…)` 或 `notify_cancel`）；daemon 照常运行。这样登记的 agent 在自己的回合里就能知道。11-06 联合测试中，Codex 研究员把 herdr 目标写成并不存在的 `coordinator`，5 次投递失败后通知标为 failed，没有任何地方显示原因，项目空等了约 8 小时。
+- **日志。** `<状态目录>/<notifier>.log` 每行一个 JSON：`started`（pid、host、间隔、启动方式 ensure、listen 或 run）、`exited`（原因、最近一次成功 poll 的时间）、`poll_errors`、`poll_failed`、`delivery`（每次投递尝试的结果，以及之后通知的状态；此前叫 `delivered`，重试和失败也记成它，容易误读）、`given_up`（最终消息放弃投递，以及提醒的结果）、`broken_notice`、`resumed`、`inbox_removed`。
 - **关闭名单与收件目录。** poll 结果附上这个 notifier 最近 30 天关闭的通知（状态、关闭时间、送达时间）。daemon 先写 `closed-<notifier>.json`，再写 `known-<notifier>.json`（未完成通知的投递目标），listener 据此说明退出原因（9.4）。通知确认、取消或 dismissed 满 7 天后，daemon 删掉它的收件目录；已送达未确认的保留，消息可能还没被读。
 - **本机需要一份 miyabi-mcp。** 即仓库克隆加 `uv sync`。daemon 只用标准库部分，不依赖 MCP SDK。
 
@@ -715,7 +716,7 @@ Miyabi 登录节点（miyabi-mcp）                         agent 所在机器�
 | method | 机制 | 适用 | 状态 |
 | --- | --- | --- | --- |
 | `listener`（默认） | daemon 把消息写入本机收件目录就算送达。agent 用后台命令运行 `listen_command`（`notify listen --id N`），收到消息就退出，退出提示里就是通知内容。listen 还会确保 daemon 在运行。没人运行 `listen_command` 时消息就停在收件目录里：只运行 `start_command` 收不到。收件目录先到先得，不是广播 | Claude Code：agent 忙时提示排队，空闲时开始新回合；其他 agent 用 listener 时同样要运行 `listen_command` | 待实测。同一机制（后台命令退出）已在旧 waiter 上实测通过（10-30） |
-| `herdr` | `herdr agent prompt <agent> "<msg>"`，可加 `--machine` | herdr 中的任意 TUI agent（Claude Code、Codex、pi） | 未验证。agent 停在对话框时返回 agent_blocked，稍后重试 |
+| `herdr` | `herdr agent prompt <agent> "<msg>"`，可加 `--machine`。agent 是唯一的 agent 名，或其中有 agent 的 pane id | herdr 中的任意 TUI agent（Claude Code、Codex、pi） | 11-06 联合测试中用过（目标写错的那次见 9.3）。herdr 的错误码记入投递结果（`code`）：`agent_blocked`（停在对话框）和 `agent_not_found`（名字错了，或 agent 正在重启）都稍后重试；登记时由 `notifyd ensure` 检查 agent 是否存在 |
 | `tmux` | `tmux send-keys -l` 后再按 Enter | tmux 中的 agent | 未验证，兜底 |
 | `codex_queue` | `codex queue --thread … --remote unix://…`，用本机的 app-server | Codex | 旧实现实测确认 21 次，需在 0.163 上复验 |
 | `command` | 运行本机 daemon 配置中具名的命令，消息 JSON 从 stdin 传入 | 自定义 | — |
@@ -747,12 +748,18 @@ Acknowledge: notify_ack(id="N-20261030-181500-ab12", ack_token="k3f9q")
 
 ```
 open ─封口─▶ sealed ─条件满足或超时─▶ fired ─投递─▶ delivered ─ack─▶ acknowledged
-  └──────────── cancelled ◀───────────────┘    │            └─notify_cancel─▶ dismissed
-                                                └─▶ failed（多次投递失败，原因可见）
+  └──────────── cancelled ◀───────────────┘  │  ▲          └─notify_cancel─▶ dismissed
+                                             │  └─notify_update(deliver)─┐
+                                             └─▶ failed（多次投递失败）──┘
 ```
 
 - 投递至少一次，agent 用 ack token 去重。
-- 投递失败（例如 herdr 一直 blocked）超过 5 次就标为 failed，并在 `notify_list` 中显示原因。
+- 投递失败（例如 herdr 一直 blocked）超过 5 次就标为 failed。原因要有处可查，也要有人知道：
+  - `notify_list` 的每个通知带 `delivery`（最新一条消息的状态、尝试次数、最后一次结果及其 `code`）；failed 的另有 `failure`，写明尝试次数、最后一次的时间和错误。重试期间也看得到最后一次失败的原因。
+  - `job_wait` 和 `job_get` 的 `notifications` 中，failed 的 `next` 写明原因和补救办法，fired 的写明已尝试几次、最后一次的结果。
+  - daemon 放弃一条最终消息时，若本机有 herdr，就用 `herdr notification show` 提醒本机的人（`--sound request`），正文是失败原因和原消息。只有目标本身是对的，通知才能自动送达；目标错了，只有人或登记它的 agent 能改。
+  - 改正目标：`notify_update(id, deliver=…)`。failed 的通知回到 fired，最终消息从头计算尝试次数、重新投递（同一个 ack token）。
+  - 11-06 之前，原因只写在 agent 所在机器上的 daemon 日志里，`notify_list` 和 `job_wait` 只说"见 notify_list"。
 - 一次投递的结果分四种：`delivered`；`uncertain`（程序已经运行但超时，可能已送达，按已送达处理，避免重复打扰）；`retry`（例如磁盘满，什么也没送出）；`failed`（找不到程序或没有权限：什么也没送出，重试也没用，通知立即标为 failed）。此前所有 OSError 都算 uncertain，投递程序不存在时最终消息被标成 delivered，不再重试（11-05 审查时复现）。
 - 提前失败和状态不明的消息不改变组通知的状态。
 - 已送达却没人确认的通知（例如没人运行 `listen_command`，消息从没被读），用 `notify_cancel` 关成 `dismissed`：不需要 token，也不算确认；8.6 的 token 规则不变，dismissed 之后仍可凭 token ack（11-05 定，D6）。job_wait 只列出通知和收尾方法，不返回 token。

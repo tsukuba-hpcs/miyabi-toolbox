@@ -268,8 +268,16 @@ own machine.
   notice is the message. The daemon delivers by writing to the machine's inbox, so a message nobody listens
   for is never seen: `start_command` alone does not show it. This holds for any agent, not only Claude Code.
 - An agent that cannot use a background command chooses a `deliver` that reaches it and runs `start_command`:
-  `herdr` (`agent`), `tmux` (`target`), `codex_queue` (`thread`, `remote`), `command` (a name in the machine's
-  config) or `file` (`path`). herdr, tmux and codex_queue are not yet verified live.
+  `herdr` (`agent`: a unique agent name or the pane id of a pane hosting the agent), `tmux` (`target`),
+  `codex_queue` (`thread`, `remote`), `command` (a name in the machine's config) or `file` (`path`). tmux and
+  codex_queue are not yet verified live.
+- `start_command` also checks, on that machine, the target of every open notification of the notifier: a herdr
+  agent or tmux target that does not exist, a command not configured, or codex not installed makes it fail
+  with `delivery_target_unreachable`, naming the notification and the live herdr agents. Fix the target with
+  `notify_update(id, deliver=...)` and run it again. A message given up after five attempts leaves the
+  notification `failed`, with the reason in `notify_list` (`failure`, `delivery`) and in `job_get`/`job_wait`;
+  where herdr runs, the daemon also raises a herdr notification for the person at the machine.
+  `notify_update(deliver=...)` on a failed notification delivers its final message again.
 
 One notification has one receiver: the agent that submitted the jobs and will act on the result. A
 coordinator follows the jobs with `notify_list` and `job_get` rather than listening. When two agents must both

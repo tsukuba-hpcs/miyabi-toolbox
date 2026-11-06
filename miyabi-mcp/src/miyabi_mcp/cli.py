@@ -103,6 +103,9 @@ def build_parser() -> argparse.ArgumentParser:
     poll.add_argument("--interval", type=int, help="the daemon's poll interval, recorded in its heartbeat")
     poll.add_argument("--instance", help="the daemon instance (host:pid:start)")
     poll.add_argument("--exiting", choices=["idle", "stopped", "error"], help="report this daemon's exit")
+    targets = notify_sub.add_parser("targets", parents=[common],
+                                    help="open notifications of a notifier and their targets (used by notifyd ensure)")
+    targets.add_argument("--notifier", required=True)
     report = notify_sub.add_parser("report", parents=[common], help="record a delivery attempt (used by notifyd)")
     report.add_argument("--msg", required=True)
     report.add_argument("--outcome", required=True, help="JSON outcome, e.g. {\"status\": \"delivered\"}")
@@ -130,8 +133,8 @@ def main(argv: list[str] | None = None) -> int:
             options = _options(args)
             if args.action == "run":
                 return notifyd.run(options)
-            return _emit({"ensure": notifyd.ensure, "status": notifyd.status, "stop": notifyd.stop}[args.action](options),
-                         args.pretty)
+            return _emit({"ensure": notifyd.ensure_checked, "status": notifyd.status,
+                          "stop": notifyd.stop}[args.action](options), args.pretty)
         if args.command == "notify" and args.action == "listen":
             from .notifyd import listen
 
@@ -153,6 +156,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.action == "poll":
                 return _emit(notify.poll(settings, args.notifier, args.caller, interval=args.interval,
                                          instance=args.instance, exiting=args.exiting), args.pretty)
+            if args.action == "targets":
+                return _emit(notify.targets(settings, args.notifier), args.pretty)
             return _emit(notify.report(settings, args.msg, json.loads(args.outcome)), args.pretty)
         if args.command == "init":
             return _emit(_init(settings, args.policy), args.pretty)

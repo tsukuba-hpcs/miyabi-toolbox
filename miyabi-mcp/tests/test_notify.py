@@ -379,6 +379,127 @@ class DeliveryErrorTests(NotifyCase):
             self.assertEqual(self.send(["true"])["status"], "retry")
 
 
+FAKE_HERDR = r"""#!/bin/sh
+# A fake herdr: the agents named in $FAKE_HERDR_AGENTS exist; every call is appended to $FAKE_HERDR_LOG.
+echo "$*" >> "$FAKE_HERDR_LOG"
+if [ "$1" = "--machine" ]; then shift 2; fi
+case "$1 $2" in
+  "agent get"|"agent prompt")
+    for a in $FAKE_HERDR_AGENTS; do
+      if [ "$a" = "$3" ]; then echo '{"id":"cli","result":{}}'; exit 0; fi
+    done
+    echo '{"error":{"code":"agent_not_found","message":"agent target '"$3"' not found"},"id":"cli:agent"}' >&2
+    exit 1;;
+  "agent list")
+    printf '{"id":"cli","result":{"agents":['; sep=""
+    for a in $FAKE_HERDR_AGENTS; do
+      printf '%s{"name":"%s","pane_id":"w5:p1","agent":"claude"}' "$sep" "$a"; sep=","
+    done
+    echo ']}}'; exit 0;;
+  "notification show") exit 0;;
+esac
+exit 2
+"""
+
+
+class TargetTests(NotifyCase):
+    """A target the daemon cannot reach: named when registered, explained and alerted when given up (11-06)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        herdr = self.bin / "herdr"
+        herdr.write_text(FAKE_HERDR)
+        herdr.chmod(0o755)
+        self.herdr_log = self.project / "herdr.log"
+        os.environ.update(PATH=f"{self.bin}:{os.environ['PATH']}", FAKE_HERDR_AGENTS="coord-a researcher-1",
+                          FAKE_HERDR_LOG=str(self.herdr_log))
+
+    def run_cli(self, *args, timeout=120) -> subprocess.CompletedProcess:
+        return subprocess.run([str(LAUNCHER), *args], capture_output=True, text=True, timeout=timeout)
+
+    def stop_daemon(self) -> None:
+        self.run_cli("notifyd", "stop", "--notifier", HOST)
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            if not json.loads(self.run_cli("notifyd", "status", "--notifier", HOST).stdout)["running"]:
+                break
+            time.sleep(0.3)
+
+    def herdr_notification(self, agent: str) -> tuple[str, str]:
+        job_id = self.submit(name="x")["job_id"]
+        created = self.ok_call("notify_create", {"job_ids": [job_id], "notifier": HOST, "name": "E-0001-jobs",
+                                                 "deliver": {"method": "herdr", "agent": agent}})
+        return job_id, created["notification"]["id"]
+
+    def calls(self, prefix: str) -> int:
+        return sum(line.startswith(prefix) for line in self.herdr_log.read_text().splitlines())
+
+    def test_herdr_outcomes_carry_its_error_code(self):
+        def send(agent: str) -> dict:
+            return delivery.send({"method": "herdr", "agent": agent}, "hi", state_dir=self.project,
+                                 notification_id="N-1", msg_id="N-1:1")
+
+        self.assertEqual(send("coord-a"), {"status": "delivered"})
+        missing = send("coordinator")
+        self.assertEqual((missing["status"], missing["code"]), ("retry", "agent_not_found"))
+        self.assertIsNone(delivery.check({"method": "herdr", "agent": "researcher-1"}))
+        self.assertIn("live agents: coord-a (w5:p1)", delivery.check({"method": "herdr", "agent": "coordinator"}))
+        self.assertIn("no command 'x'", delivery.check({"method": "command", "name": "x"}, {}))
+        self.assertIsNone(delivery.check({"method": "command", "name": "x"}, {"x": ["true"]}))
+
+    def test_ensure_names_a_target_that_does_not_exist(self):
+        _job, notification = self.herdr_notification("coordinator")
+        self.addCleanup(self.stop_daemon)
+        run = self.run_cli("notifyd", "ensure", "--notifier", HOST, "--poll-seconds", "1")
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        error = json.loads(run.stdout)["error"]
+        self.assertEqual(error["type"], "delivery_target_unreachable")
+        self.assertIn(f"{notification} (E-0001-jobs): herdr has no agent 'coordinator'", error["message"])
+        self.assertIn("coord-a (w5:p1)", error["message"])
+        self.assertTrue(error["daemon"]["running"])  # the daemon runs all the same
+        self.ok_call("notify_update", {"id": notification, "deliver": {"method": "herdr", "agent": "coord-a"}})
+        run = self.run_cli("notifyd", "ensure", "--notifier", HOST, "--poll-seconds", "1")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(json.loads(run.stdout)["target_check"], "ok")
+
+    def test_a_message_given_up_is_explained_alerted_and_can_be_sent_again(self):
+        job_id, notification = self.herdr_notification("coordinator")
+        self.finish(job_id)
+        run = self.run_cli("notifyd", "run", "--notifier", HOST, "--poll-seconds", "1", "--idle-polls", "1")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        listed = self.ok_call("notify_list")["notifications"][0]
+        self.assertEqual(listed["status"], "failed")
+        self.assertEqual((listed["delivery"]["attempts"], listed["delivery"]["last_outcome"]["code"]),
+                         (notify.MAX_ATTEMPTS, "agent_not_found"))
+        self.assertIn("agent target coordinator not found", listed["failure"])
+        self.assertEqual(self.calls("agent prompt coordinator "), notify.MAX_ATTEMPTS)
+        self.assertEqual(self.calls(f"notification show miyabi-mcp: notification {notification} was not delivered"), 1)
+        hint = self.ok_call("job_get", {"job_ids": [job_id]})["jobs"][0]["notifications"][0]["next"]
+        self.assertIn("never delivered", hint)
+        self.assertIn("agent target coordinator not found", hint)
+        # Pointed at a live agent, the failed notification's final message goes out again.
+        self.ok_call("notify_update", {"id": notification, "deliver": {"method": "herdr", "agent": "coord-a"}})
+        self.assertEqual(self.ok_call("notify_list")["notifications"][0]["status"], "fired")
+        run = self.run_cli("notifyd", "run", "--notifier", HOST, "--poll-seconds", "1", "--idle-polls", "1")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(self.ok_call("notify_list")["notifications"][0]["status"], "delivered")
+        self.assertEqual(self.calls("agent prompt coord-a "), 1)
+
+    def test_targets_reach_a_remote_daemon_without_side_effects(self):
+        fake_ssh = self.bin / "fake-ssh"
+        fake_ssh.write_text('#!/bin/sh\nwhile [ "${1#-}" != "$1" ]; do [ "$1" = "-o" ] && shift; shift; done\n'
+                            'shift\nexec sh -c "$*"\n')
+        fake_ssh.chmod(0o755)
+        os.environ["MIYABI_MCP_SSH"] = str(fake_ssh)
+        job_id = self.submit(name="y", notify={"notifier": "laptop", "deliver": {"method": "herdr", "agent": "nobody"}})
+        options = notifyd.Options(notifier="laptop", remote="miyabi-g", remote_launcher=str(LAUNCHER))
+        [problem] = notifyd.check_targets(options)
+        self.assertEqual(problem["deliver"], {"method": "herdr", "agent": "nobody"})
+        self.assertIn("herdr has no agent 'nobody'", problem["problem"])
+        self.assertEqual(notify.daemon_info(self.settings(), "laptop")["state"], "never")  # no poll was recorded
+        self.assertTrue(job_id["ok"])
+
+
 class NotifierNameTests(NotifyCase):
     def test_notifier_names_are_checked_and_commands_quoted(self):
         bad = self.call("notify_create", {"name": "x", "timeout": 60, "notifier": "box; rm -rf ~"})

@@ -115,13 +115,56 @@ def poll(opts: Options, instance: str | None = None, exiting: str | None = None)
                        exiting=exiting)
 
 
-def report(opts: Options, project_dir: str, msg_id: str, outcome: dict) -> None:
+def report(opts: Options, project_dir: str, msg_id: str, outcome: dict) -> str | None:
+    """Record one delivery attempt; returns the notification's status after it (failed: given up)."""
     if opts.remote:
-        _remote(opts, ["--project-dir", project_dir, "notify", "report", "--msg", msg_id, "--outcome", compact(outcome)])
-        return
+        return _remote(opts, ["--project-dir", project_dir, "notify", "report", "--msg", msg_id,
+                              "--outcome", compact(outcome)]).get("status")
     from . import notify
 
-    notify.report(config.load(project_dir=project_dir), msg_id, outcome)
+    return notify.report(config.load(project_dir=project_dir), msg_id, outcome).get("status")
+
+
+def targets(opts: Options) -> dict:
+    """The open notifications this notifier delivers, with their targets (the server changes nothing)."""
+    if opts.remote:
+        return _remote(opts, ["notify", "targets", "--notifier", opts.notifier])
+    from . import notify
+
+    return notify.targets(config.load(), opts.notifier)
+
+
+def check_targets(opts: Options) -> list[dict]:
+    """The open notifications whose target this machine cannot reach now, each with the reason."""
+    commands, verdicts, problems = local_commands(), {}, []
+    for item in targets(opts).get("notifications") or []:
+        key = compact(item["deliver"])
+        if key not in verdicts:
+            verdicts[key] = delivery.check(item["deliver"], commands)
+        if verdicts[key]:
+            problems.append({"id": item["id"], "name": item.get("name"), "project_dir": item.get("project_dir"),
+                             "deliver": item["deliver"], "problem": verdicts[key]})
+    return problems
+
+
+def ensure_checked(opts: Options) -> dict:
+    """`notifyd ensure`, the start_command an agent runs right after registering a notification: start the
+    daemon unless one runs, then check from here the targets of this notifier's open notifications. One that
+    cannot be reached fails the command, so the agent that registered it hears of it in its own turn rather
+    than nobody hearing of it once the jobs have ended."""
+    result = ensure(opts)
+    try:
+        problems = check_targets(opts)
+    except MiyabiError as exc:  # the daemon runs; only the check could not be made
+        return {**result, "target_check": f"not made: {exc}"}
+    if problems:
+        names = "; ".join(f"{p['id']} ({p.get('name') or 'unnamed'}): {p['problem']}" for p in problems)
+        raise MiyabiError("delivery_target_unreachable",
+                          f"the daemon of {opts.notifier} runs, but {len(problems)} open notification(s) cannot reach "
+                          f"their target from this machine: {names}. Point each at a reachable target with "
+                          "notify_update(id=..., deliver={...}) (or notify_cancel it), then run this command again",
+                          notifications=problems, daemon=result)
+    return {**result, "target_check": "ok"}
 
 
 # -- the daemon -----------------------------------------------------------------------------------------------------
@@ -195,9 +238,9 @@ def ensure(opts: Options, by: str = "ensure") -> dict:
     if _alive(state):
         return _running(opts, paths, state)
     holder = Lock(paths["lock"]).holder()
-    raise MiyabiError("daemon_failed", f"no notification daemon runs, and a new one cannot take the lock {paths['lock']} "
-                      f"(held by {holder!r}): the process holding it is still alive, and the lock goes away when it "
-                      f"exits. See {paths['log']}")
+    raise MiyabiError("daemon_failed", f"no notification daemon runs, and a new one cannot take the lock "
+                      f"{paths['lock']} (held by {holder!r}): the process holding it is still alive, and the lock "
+                      f"goes away when it exits. See {paths['log']}")
 
 
 def stop(opts: Options) -> dict:
@@ -226,6 +269,16 @@ def _broken(opts: Options, paths: dict, known: dict, error: str, commands: dict)
         outcome = delivery.send(target, text, state_dir=paths["dir"], notification_id=notification_id,
                                 msg_id=f"{notification_id}:broken-{stamp}", commands=commands)
         _log(paths, event="broken_notice", notification=notification_id, outcome=outcome)
+
+
+def _given_up(paths: dict, message: dict, outcome: dict) -> None:
+    """The final message of a notification was given up: tell the person at this machine (herdr), if possible."""
+    reason = " ".join(str(part) for part in (outcome.get("code"), outcome.get("detail")) if part) \
+        or outcome.get("status")
+    title = f"miyabi-mcp: notification {message['notification_id']} was not delivered"
+    body = (f"Delivery to {compact(message['deliver'])} failed: {reason}. The message was:\n{message['message']}")
+    result = delivery.alert(message["deliver"], title, body)
+    _log(paths, event="given_up", notification=message["notification_id"], alert=result)
 
 
 def _clean_inboxes(paths: dict, closed: dict) -> None:
@@ -309,8 +362,10 @@ def run(opts: Options) -> int:
                     outcome = delivery.send(message["deliver"], message["message"], state_dir=paths["dir"],
                                             notification_id=message["notification_id"], msg_id=message["msg_id"],
                                             commands=commands)
-                    report(opts, message["project_dir"], message["msg_id"], outcome)
-                    _log(paths, event="delivered", msg_id=message["msg_id"], outcome=outcome)
+                    status = report(opts, message["project_dir"], message["msg_id"], outcome)
+                    _log(paths, event="delivery", msg_id=message["msg_id"], outcome=outcome, notification=status)
+                    if status == "failed" and outcome.get("status") not in {"delivered", "uncertain"}:
+                        _given_up(paths, message, outcome)
             except TRANSIENT as exc:
                 failures += 1
                 troubled += 1
