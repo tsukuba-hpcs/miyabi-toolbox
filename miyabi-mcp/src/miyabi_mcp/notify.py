@@ -776,4 +776,10 @@ def job_wait(settings: Settings, args: dict, cancelled=lambda: False, progress=N
             return result
         if progress:
             progress(elapsed, timeout)
-        time.sleep(min(10.0, max(0.5, timeout - elapsed)))
+        # A cancelled call ends within 0.25 s rather than after the whole pause: pi-env-mcp, which can host this server,
+        # kills it 2 s after closing its stdin, and the closed stdin cancels the call (DESIGN.md 5.4).
+        until = time.monotonic() + min(10.0, max(0.5, timeout - elapsed))
+        while time.monotonic() < until:
+            if cancelled():
+                return ok(met=False, cancelled=True, waited_s=round(time.monotonic() - start, 1), jobs=summary)
+            time.sleep(min(0.25, max(0.0, until - time.monotonic())))

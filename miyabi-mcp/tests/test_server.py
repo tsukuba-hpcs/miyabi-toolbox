@@ -1,6 +1,9 @@
 """The MCP server over stdio, driven by the official SDK client through bin/miyabi-mcp."""
 
+import json
 import os
+import subprocess
+import time
 import unittest
 
 import anyio
@@ -8,7 +11,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from base import ROOT, FakePbsCase
-from miyabi_mcp import version
+from miyabi_mcp import server, version
 
 
 class ServerTests(FakePbsCase):
@@ -87,6 +90,35 @@ class ServerTests(FakePbsCase):
         result = self.run_session(body)
         self.assertFalse(result.structuredContent["met"])
         self.assertTrue(seen)
+
+    def test_a_closed_stdin_ends_a_running_job_wait_at_once(self):
+        """pi-env-mcp closes a hosted server's stdin and kills it 2 s later; until 11-06 job_wait slept on
+        for up to 10 s."""
+        job_id = self.submit()["job_id"]  # stays queued: the wait would run to its timeout
+        process = subprocess.Popen([str(ROOT / "bin" / "miyabi-mcp"), "serve", "--project-dir", str(self.project)],
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        self.addCleanup(lambda: process.poll() is None and process.kill())
+
+        def send(message: dict) -> None:
+            process.stdin.write(json.dumps({"jsonrpc": "2.0", **message}) + "\n")
+            process.stdin.flush()
+
+        send({"id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                                                          "clientInfo": {"name": "test", "version": "0"}}})
+        self.assertIn("result", json.loads(process.stdout.readline()))
+        send({"method": "notifications/initialized"})
+        send({"id": 2, "method": "tools/call", "params": {"name": "job_wait",
+                                                          "arguments": {"job_ids": [job_id], "timeout_s": 40}}})
+        time.sleep(1.5)  # inside its first pause
+        closed = time.monotonic()
+        process.stdin.close()
+        process.wait(timeout=30)
+        self.assertLess(time.monotonic() - closed, 2.0)
+
+
+class InstructionsTests(unittest.TestCase):
+    def test_instructions_fit_what_pi_env_mcp_shows(self):
+        self.assertLessEqual(len(server.INSTRUCTIONS), 2000)  # pi-env-mcp cuts a hosted server's instructions there
 
 
 if __name__ == "__main__":

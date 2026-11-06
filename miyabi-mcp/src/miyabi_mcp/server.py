@@ -17,37 +17,29 @@ from . import tools, version
 from .config import Settings
 from .util import compact
 
+# At most 2000 characters: pi-env-mcp, which can host this server on the login node, shows no more of a hosted server's
+# instructions (DESIGN.md 5.4). Details live in the tool descriptions and in each result's `next`.
 INSTRUCTIONS = """\
 miyabi-mcp operates Miyabi PBS for this project: queries, submission, cancellation, a job ledger in
 <project>/.miyabi-mcp/ and wake-ups. Rules:
-- Call pbs_context first. The server runs on a Miyabi login node: it never runs workloads; tests,
-  training and anything heavy run inside PBS jobs.
+- Call pbs_context first. The server runs on a login node and never runs workloads: tests, training
+  and anything heavy run inside PBS jobs.
 - Submitting is two calls: job_submit (dry run) shows the checked plan; show it to the user when the
   job is not clearly within their authorization, then call again with dry_run=false and the plan_digest.
   Size walltime from measurements (about 1.5x); a user's limit is a cap, never the request.
-- Interactive work: call interactive_plan with an interact-g/interact-c/interact-mig queue, walltime and
-  a unique request_key. It only prepares a checked plan. Run its launch_command in pi-env-mcp terminal_open
-  on the login node within 10 minutes; keep terminal_id and use terminal_read/send for that same shell.
-  The runner rechecks policy, submits qsub -I, records the job ID, and closes the terminal when qsub ends.
-  Wait for the compute prompt, then run allocation_check_command IN THAT TERMINAL and require ok=true.
-  pbs_context/allocation_check on this login-side MCP server cannot verify the remote compute shell.
-  Set modules, cd to the project and select its interpreter there; inspect remaining walltime before work.
-  Run fallible checks in a child shell so failure does not close the allocation. Preserve outputs under
-  /work, stop owned background processes, then exit; use job_get to confirm completion. For cancellation
-  use job_cancel dry-run/commit for the exact ID, then terminal_close. Terminal timeouts do not cancel;
-  lost terminals cannot be reattached. Check the existing job before retrying with the same request_key.
 - FINISH and Exit_status=0 do not mean the application succeeded: check the outputs. A FINISH without
   a start time never ran.
 - Do not poll in a loop. For jobs of a few minutes use job_wait. For longer ones submit with
-  notify={"name": ..., "expected": <jobs in the group>, "message": <what to do next>}: one notification
-  covers a group (e.g. all seeds). After every registration or join, run the command the result's
-  `next` names on your own machine, even when the daemon seems to be running (it is idempotent). With
-  deliver=listener (the default) only daemon.listen_command shows the message (Claude Code: Bash with
-  run_in_background=true); daemon.start_command alone never does. Other delivery methods need
-  daemon.start_command. One receiver per notification: the agent that submitted listens; when two
-  agents must wake, create two notifications. Keep working on things that do not depend on the jobs.
+  notify={"name": ..., "expected": <jobs in the group>, "message": <what to do next>}. After every
+  registration or join, run the command the result's `next` names on your own machine, even when the
+  daemon seems to run. With deliver=listener (the default) only daemon.listen_command shows the message
+  (Claude Code: Bash with run_in_background=true); daemon.start_command alone never does. One receiver
+  per notification: for two agents, two notifications. Meanwhile do work that does not need the jobs.
   When notified, read the jobs with job_get, then notify_ack with the token of the final message.
 - Cancel only jobs this project submitted (job_cancel dry run first).
+- Interactive work: interactive_plan only prepares a checked plan; follow its description and `next`.
+  Run its launch_command in a pi-env-mcp terminal on the login node, then allocation_check_command IN
+  THAT TERMINAL, and require ok=true before any work. A terminal timeout does not cancel the job.
 """
 
 

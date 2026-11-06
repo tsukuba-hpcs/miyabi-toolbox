@@ -130,7 +130,10 @@ TOOLS = [
          "the job before relaying the shell. Keep terminal_id for terminal_send/read; a timeout is not cancellation. "
          "After the compute prompt, run allocation_check_command in that terminal before any workloads. "
          "exit releases the allocation and closes the terminal; job_cancel handles queued/running cancellation. "
-         "Reuse request_key for retries; a lost terminal cannot be reattached.",
+         "Reuse request_key for retries; a lost terminal cannot be reattached. In the compute shell: load modules, "
+         "cd to the project, select its interpreter and check the remaining walltime first; run fallible checks in "
+         "a child shell so that a failure does not close the allocation; keep outputs under /work, stop your "
+         "background processes, then exit, and confirm with job_get.",
          schema({"queue": {"enum": ["interact-g", "interact-c", "interact-mig"]},
                  "walltime": {**STR, "description": "Required HH:MM:SS, sized for the actual work."},
                  "select": {**STR, "description": "PBS select, e.g. 1:mpiprocs=1; MIG counts instances."},
